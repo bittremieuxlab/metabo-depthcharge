@@ -18,4 +18,5 @@ htmlcov/
 .DS_Store
 *.log
 lightning_logs/
+uv.lock
 outputs/

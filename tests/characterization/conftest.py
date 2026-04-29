@@ -9,7 +9,6 @@ passed explicitly at run time:
 """
 
 import sys
-import pytest
 
 
 def pytest_addoption(parser):

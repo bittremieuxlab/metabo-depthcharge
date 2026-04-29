@@ -1,10 +1,3 @@
 """Spectrum transformer encoders"""
 
-__all__ = [
-    "MetadataEncoder",
-    "PeakEncoder",
-    "AttnAggregator",
-    "ResidualProjection",
-    "DepthchargeEncoder",
-    "DreaMSEncoder",
-]
+# TODO: port from spectrawl/nn/transformers.py

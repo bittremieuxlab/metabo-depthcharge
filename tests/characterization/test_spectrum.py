@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 import spectrawl.data.spectra as orig
+
 import metabo_depthcharge.spectrum as new
 
 
@@ -15,7 +16,7 @@ def orig_s():
 
 
 def new_s():
-    return new.SpectrumObject(mz=MZ.copy(), intensity=INTENSITY.copy())
+    return new.Spectrum(mz=MZ.copy(), intensity=INTENSITY.copy())
 
 
 def assert_spectra_equal(o, n):
@@ -80,6 +81,7 @@ def test_len():
 def test_torch():
     pytest.importorskip("torch")
     import torch
+
     o = orig_s().torch()
     n = new_s().torch()
     assert torch.equal(o["mz"], n["mz"])

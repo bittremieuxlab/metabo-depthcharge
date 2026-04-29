@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 
 dependencies = [
     "numpy>=1.24.0",
+    "matplotlib>=3.7.0",
     "pandas>=2.0.0",
     "rdkit>=2023.9.0",
     "myopic_mces>=1.0.0,<2.0.0",
@@ -27,11 +28,18 @@ nn = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "ruff>=0.4.0",
+    "pre-commit>=3.0.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["metabo_depthcharge*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+exclude = [".git", "__pycache__", "build", "dist", "*.egg-info"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM"]
@@ -40,7 +48,9 @@ ignore = [
     "N803",   # argument name lowercase (scientific naming)
     "N806",   # variable lowercase (scientific naming)
     "N812",   # F imported as non-lowercase (torch.nn.functional as F)
+    "SIM102", # nested if → keep original logic readable
     "SIM108", # ternary operator
+    "UP031",  # %-format → keep original repr style
 ]
 fixable = ["ALL"]
 
