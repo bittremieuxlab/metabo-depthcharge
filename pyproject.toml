@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+
+[project]
+name = "metabo-depthcharge"
+dynamic = ["version"]
+requires-python = ">=3.10"
+
+dependencies = [
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "rdkit>=2023.9.0",
+    "myopic_mces>=1.0.0,<2.0.0",
+    "h5py>=3.10.0",
+]
+
+[project.optional-dependencies]
+nn = [
+    "torch>=2.0.0",
+    "lightning>=2.0.0",
+    "depthcharge-ms @ git+https://github.com/wfondrie/depthcharge.git@bd2861f",
+]
+
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["metabo_depthcharge*"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM"]
+ignore = [
+    "E501",   # line too long
+    "N803",   # argument name lowercase (scientific naming)
+    "N806",   # variable lowercase (scientific naming)
+    "N812",   # F imported as non-lowercase (torch.nn.functional as F)
+    "SIM108", # ternary operator
+]
+fixable = ["ALL"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401", "F403"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["metabo_depthcharge"]
+lines-after-imports = 2
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ============================================================================
+# Pytest
+# ============================================================================
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = ["-v", "--strict-markers"]
+markers = [
+    "unit: fast isolated tests",
+    "integration: slower tests that may need data or models",
+    "slow: tests that take several seconds",
+]
