@@ -1,12 +1,10 @@
 import warnings
 
 import numpy as np
-import torch
 from biosynfoni import Biosynfoni
 from map4 import MAP4
 from rdkit import Chem
 from rdkit.Chem import AllChem, DataStructs, MolStandardize, SanitizeFlags
-from transformers import AutoModel, AutoTokenizer
 
 
 def canonicalize_smiles(smiles: str) -> str:
@@ -288,6 +286,9 @@ class SmilesToMolFormer:
         model_name: str = "ibm-research/MoLFormer-XL-both-10pct",
         device: str = "cpu",
     ) -> None:
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+
         self.model_name = model_name
         self.device = device
 
@@ -316,6 +317,8 @@ class SmilesToMolFormer:
         self.fp_size = self.model.config.hidden_size
 
     def __call__(self, smiles: str | list[str]) -> np.ndarray:
+        import torch
+
         is_single = not isinstance(smiles, (list, np.ndarray))
         smiles_list = [
             canonicalize_smiles(s) for s in ([smiles] if is_single else smiles)
@@ -369,6 +372,9 @@ class SmilesToChemBERTa:
         model_name: str = "Derify/ChemBERTa_augmented_pubchem_13m",
         device: str = "cpu",
     ) -> None:
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+
         self.model_name = model_name
         self.device = device
 
@@ -405,6 +411,8 @@ class SmilesToChemBERTa:
             return_tensors="pt",
         )
         inputs = {k: v.to(self.torch_device) for k, v in inputs.items()}
+
+        import torch
 
         with torch.no_grad():
             outputs = self.model(**inputs)
