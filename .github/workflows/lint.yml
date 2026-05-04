@@ -22,7 +22,7 @@ jobs:
         uses: astral-sh/setup-uv@v3
 
       - name: Run Ruff linter
-        run: uv run ruff check .
+        run: uvx ruff check .
 
       - name: Run Ruff formatter check
-        run: uv run ruff format --check .
+        run: uvx ruff format --check .

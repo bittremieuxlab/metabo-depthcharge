@@ -140,8 +140,8 @@ class MCESDistance:
         Use stronger bound in MCES (default: True).
     n_jobs: int
         Number of parallel workers. -1 uses all CPUs (default: -1).
-    solver_options: dict
-        Options for the underlying solver (default: dict(msg=0)).
+    solver_options: dict or None
+        Options for the underlying solver. None uses ``{"msg": 0}`` (default: None).
     solver: str
         Solver to use (default: "HiGHS").
     timeout: float or None
@@ -155,14 +155,16 @@ class MCESDistance:
         threshold: int = 15,
         always_stronger_bound: bool = True,
         n_jobs: int = -1,
-        solver_options: dict = dict(msg=0),
+        solver_options: dict | None = None,
         solver: str = "HiGHS",
         timeout: float | None = None,
     ) -> None:
         self.threshold = threshold
         self.always_stronger_bound = always_stronger_bound
         self.n_jobs = cpu_count() if n_jobs == -1 else n_jobs
-        self.solver_options = solver_options
+        self.solver_options = (
+            solver_options if solver_options is not None else {"msg": 0}
+        )
         self.solver = solver
         self.timeout = timeout
 

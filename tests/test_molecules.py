@@ -16,9 +16,6 @@ ASPIRIN = "CC(=O)Oc1ccccc1C(=O)O"
 CAFFEINE = "Cn1cnc2c1c(=O)n(C)c(=O)n2C"
 
 
-# --- canonicalize_smiles / safe_mol_from_smiles ---
-
-
 def test_canonicalize_smiles_is_stable():
     canon = canonicalize_smiles(ASPIRIN)
     assert canonicalize_smiles(canon) == canon
@@ -39,9 +36,6 @@ def test_safe_mol_from_smiles_valid():
 def test_safe_mol_from_smiles_invalid_raises():
     with pytest.raises(ValueError):
         safe_mol_from_smiles("not-a-smiles-!!!")
-
-
-# --- SmilesToMorgan ---
 
 
 def test_morgan_single_shape():
@@ -77,9 +71,6 @@ def test_morgan_different_molecules():
     assert not np.array_equal(enc(ASPIRIN), enc(CAFFEINE))
 
 
-# --- SmilesToRdkit ---
-
-
 def test_rdkit_fp_single_shape():
     enc = SmilesToRdkit()
     assert enc(ASPIRIN).shape == (4096,)
@@ -93,9 +84,6 @@ def test_rdkit_fp_batch():
 def test_rdkit_fp_binary():
     fp = SmilesToRdkit()(ASPIRIN)
     assert set(np.unique(fp)).issubset({0, 1})
-
-
-# --- SmilesToMACCS ---
 
 
 def test_maccs_fp_size():
@@ -114,9 +102,6 @@ def test_maccs_binary():
     assert set(np.unique(fp)).issubset({0, 1})
 
 
-# --- SmilesToBiosynfoni ---
-
-
 def test_biosynfoni_fp_size():
     enc = SmilesToBiosynfoni()
     assert enc.fp_size == 39
@@ -126,9 +111,6 @@ def test_biosynfoni_fp_size():
 def test_biosynfoni_batch():
     fps = SmilesToBiosynfoni()([ASPIRIN, CAFFEINE])
     assert fps.shape == (2, 39)
-
-
-# --- SmilesToMAP4 ---
 
 
 def test_map4_single_shape():
@@ -146,9 +128,6 @@ def test_map4_fp_size():
 def test_map4_batch():
     fps = SmilesToMAP4()([ASPIRIN, CAFFEINE])
     assert fps.shape == (2, 4096)
-
-
-# --- nn extras (skip if not installed) ---
 
 
 @pytest.mark.skipif(

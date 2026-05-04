@@ -31,13 +31,14 @@ def safe_mol_from_smiles(smiles: str):
             sanitizeOps=SanitizeFlags.SANITIZE_ALL ^ SanitizeFlags.SANITIZE_PROPERTIES,
         )
         warnings.warn(
-            f"Fallback parsing (skip SANITIZE_PROPERTIES) used for SMILES: {smiles}"
+            f"Fallback parsing (skip SANITIZE_PROPERTIES) used for SMILES: {smiles}",
+            stacklevel=2,
         )
         return mol
     except Chem.KekulizeException:
         pass
-    except Exception:
-        raise ValueError(f"Invalid SMILES string: {smiles}")
+    except Exception as e:
+        raise ValueError(f"Invalid SMILES string: {smiles}") from e
 
     try:
         Chem.SanitizeMol(
@@ -47,13 +48,16 @@ def safe_mol_from_smiles(smiles: str):
             ^ SanitizeFlags.SANITIZE_KEKULIZE,
         )
         warnings.warn(
-            f"Fallback parsing (skip SANITIZE_PROPERTIES and SANITIZE_KEKULIZE) used for SMILES: {smiles}"
+            f"Fallback parsing (skip SANITIZE_PROPERTIES and SANITIZE_KEKULIZE) used for SMILES: {smiles}",
+            stacklevel=2,
         )
         return mol
     except Exception:
         pass
 
-    warnings.warn(f"Fallback parsing (UNSANITIZED) used for SMILES: {smiles}")
+    warnings.warn(
+        f"Fallback parsing (UNSANITIZED) used for SMILES: {smiles}", stacklevel=2
+    )
     return mol
 
 
@@ -81,7 +85,7 @@ class SmilesToMorgan:
 
     def __call__(self, smiles: str | list[str]) -> np.ndarray:
         # Handle single SMILES (str, numpy.str_, or any non-list/array)
-        if not isinstance(smiles, (list, np.ndarray)):
+        if not isinstance(smiles, list | np.ndarray):
             mol = safe_mol_from_smiles(smiles)
             if self.counts:
                 return self.fpgen.GetCountFingerprintAsNumPy(mol)
@@ -109,7 +113,7 @@ class SmilesToRdkit:
 
     def __call__(self, smiles: str | list[str]) -> np.ndarray:
         # Handle single SMILES (str, numpy.str_, or any non-list/array)
-        if not isinstance(smiles, (list, np.ndarray)):
+        if not isinstance(smiles, list | np.ndarray):
             mol = safe_mol_from_smiles(smiles)
             if self.counts:
                 return self.fpgen.GetCountFingerprintAsNumPy(mol)
@@ -127,7 +131,7 @@ class SmilesToMACCS:
 
     def __call__(self, smiles: str | list[str]) -> np.ndarray:
         # Handle single SMILES (str, numpy.str_, or any non-list/array)
-        if not isinstance(smiles, (list, np.ndarray)):
+        if not isinstance(smiles, list | np.ndarray):
             mol = safe_mol_from_smiles(smiles)
 
             fp = AllChem.GetMACCSKeysFingerprint(mol)
@@ -146,7 +150,7 @@ class SmilesToBiosynfoni:
 
     def __call__(self, smiles: str | list[str]) -> np.ndarray:
         # Handle single SMILES (str, numpy.str_, or any non-list/array)
-        if not isinstance(smiles, (list, np.ndarray)):
+        if not isinstance(smiles, list | np.ndarray):
             mol = safe_mol_from_smiles(smiles)
             fp = Biosynfoni(mol).fingerprint
             return np.array(fp)
@@ -173,7 +177,7 @@ class SmilesToMAP4:
 
     def __call__(self, smiles: str | list[str]) -> np.ndarray:
         # Handle single SMILES (str, numpy.str_, or any non-list/array)
-        if not isinstance(smiles, (list, np.ndarray)):
+        if not isinstance(smiles, list | np.ndarray):
             mol = safe_mol_from_smiles(smiles)
             fp = self.map_calc.calculate(mol)
             return fp
@@ -245,17 +249,17 @@ class SmilesToUniMol:
                     return first_component
             raise ValueError(f"Cannot create UniMol-compatible SMILES: {smiles}")
 
-        except Exception:
+        except Exception as e:
             if "." in smiles:
                 first_component = smiles.split(".")[0]
                 if Chem.MolFromSmiles(first_component) is not None:
                     return first_component
 
-            raise ValueError(f"Cannot create UniMol-compatible SMILES: {smiles}")
+            raise ValueError(f"Cannot create UniMol-compatible SMILES: {smiles}") from e
 
     def __call__(self, smiles: str | list[str]) -> np.ndarray:
         # Handle single SMILES (str, numpy.str_, or any non-list/array)
-        is_single = not isinstance(smiles, (list, np.ndarray))
+        is_single = not isinstance(smiles, list | np.ndarray)
         smiles_list = [
             canonicalize_smiles(s) for s in ([smiles] if is_single else smiles)
         ]
@@ -319,7 +323,7 @@ class SmilesToMolFormer:
     def __call__(self, smiles: str | list[str]) -> np.ndarray:
         import torch
 
-        is_single = not isinstance(smiles, (list, np.ndarray))
+        is_single = not isinstance(smiles, list | np.ndarray)
         smiles_list = [
             canonicalize_smiles(s) for s in ([smiles] if is_single else smiles)
         ]
@@ -398,7 +402,7 @@ class SmilesToChemBERTa:
         self.fp_size = self.model.config.hidden_size
 
     def __call__(self, smiles: str | list[str]) -> np.ndarray:
-        is_single = not isinstance(smiles, (list, np.ndarray))
+        is_single = not isinstance(smiles, list | np.ndarray)
         smiles_list = [
             canonicalize_smiles(s) for s in ([smiles] if is_single else smiles)
         ]

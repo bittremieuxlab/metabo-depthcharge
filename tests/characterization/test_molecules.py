@@ -59,9 +59,6 @@ def test_safe_mol_from_smiles_invalid_raises():
         new.safe_mol_from_smiles("not-a-smiles-!!!")
 
 
-# --- Morgan ---
-
-
 def test_smiles_to_morgan_single():
     fp_orig = orig.SmilesToMorgan()(ASPIRIN)
     fp_new = new.SmilesToMorgan()(ASPIRIN)
@@ -87,9 +84,6 @@ def test_smiles_to_morgan_fp_size():
     assert enc(ASPIRIN).shape == (2048,)
 
 
-# --- RDKit ---
-
-
 def test_smiles_to_rdkit_single():
     np.testing.assert_array_equal(
         orig.SmilesToRdkit()(ASPIRIN),
@@ -103,9 +97,6 @@ def test_smiles_to_rdkit_batch():
         orig.SmilesToRdkit()(smiles),
         new.SmilesToRdkit()(smiles),
     )
-
-
-# --- MACCS ---
 
 
 def test_smiles_to_maccs_single():
@@ -125,9 +116,6 @@ def test_smiles_to_maccs_batch():
 
 def test_smiles_to_maccs_fp_size():
     assert new.SmilesToMACCS().fp_size == 167
-
-
-# --- Optional deps (skip if not installed) ---
 
 
 @pytest.fixture(scope="module")
