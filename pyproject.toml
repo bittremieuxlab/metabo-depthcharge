@@ -61,6 +61,7 @@ fixable = ["ALL"]
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403"]
 "src/metabo_depthcharge/molecules.py" = ["B028", "B904", "UP038"]
+"src/metabo_depthcharge/similarities.py" = ["B006", "C408"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["metabo_depthcharge"]
