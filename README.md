@@ -58,5 +58,5 @@ Run locally only, before modifying a module:
 ```bash
 uv run pytest tests/characterization/ \
     --spectrawl-path /path/to/spectrawl \
-    --metabo-src-path /path/to/metabo-depthcharge/src
+    --metabo-src-path /path/to/metabo-depthcharge
 ```
