@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from metabo_depthcharge.spectrum import (
+from metabo_depthcharge.spectra import (
     DefaultSpectrumProcessor,
     Normalizer,
     PeakFilter,

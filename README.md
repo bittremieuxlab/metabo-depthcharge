@@ -4,17 +4,16 @@ Shared metabolomics library for depthcharge-based MS/MS retrieval models.
 
 ## Modules
 
-| Module | Contents |
-|---|---|
-| `spectrum.py` | Spectrum object, normalizer, trimmer, peak filter, preprocessor pipeline |
-| `molecules.py` | SMILES → fingerprint converters |
-| `similarities.py` | Tanimoto, cosine, MCES distance metrics |
-| `metadata.py` | Spectrum acquisition metadata encoding (adduct, CE, instrument) |
-| `encoders.py` | Spectrum transformer encoders (depthcharge-based) |
-| `formulae.py` | Chemical formula / subformula embeddings |
-| `losses.py` | Loss functions and composer |
-| `data.py` | HDF5-backed dataset and Lightning datamodule |
-| `retrieval.py` | Retrieval model (Lightning training wrapper) |
+Layout follows [depthcharge](https://github.com/wfondrie/depthcharge) — organized by *role*, not by data type. Heavy ML deps are gated behind the optional `nn` extra.
+
+| Path | Contents | Deps |
+|---|---|---|
+| `spectra/` | Spectrum object, preprocessing primitives, (later) HF dataset loaders | base |
+| `molecules/` | SMILES utilities, fingerprint extractors, similarity metrics (Tanimoto, cosine, MCES) | base |
+| `tokenizers/` | m/z bucketing, SMILES, subformula tokenizers | base |
+| `data/` | HF Datasets-backed loaders for spectra and molecules | base |
+| `encoders/` | Neural encoders (spectrum, molecule, metadata, subformula) | `nn` |
+| `nn/` | Shared model machinery: primitives, losses, retrievers | `nn` |
 
 ## Development setup
 
