@@ -1,2 +1,1 @@
-"""Encoders: neural encoders for spectra, molecules, metadata, subformulae.
-"""
+"""Encoders: neural encoders for spectra, molecules, metadata, subformulae."""
