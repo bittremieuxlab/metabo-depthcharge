@@ -12,9 +12,11 @@ from metabo_depthcharge.molecules.fingerprints import (
     canonicalize_smiles,
     safe_mol_from_smiles,
 )
+from metabo_depthcharge.molecules.molecule import Molecule
 
 
 __all__ = [
+    "Molecule",
     "SmilesToBiosynfoni",
     "SmilesToChemBERTa",
     "SmilesToMACCS",

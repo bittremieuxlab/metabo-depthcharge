@@ -11,7 +11,7 @@ Layout follows [depthcharge](https://github.com/wfondrie/depthcharge) — organi
 | `spectra/` | Spectrum object, preprocessing primitives, (later) HF dataset loaders | base |
 | `molecules/` | SMILES utilities, fingerprint extractors, similarity metrics (Tanimoto, cosine, MCES) | base |
 | `tokenizers/` | m/z bucketing, SMILES, subformula tokenizers | base |
-| `data/` | HF Datasets-backed loaders for spectra and molecules | base |
+| `datasets/` | HF Datasets-backed loaders for spectra and molecules | base |
 | `encoders/` | Neural encoders (spectrum, molecule, metadata, subformula) | `nn` |
 | `nn/` | Shared model machinery: primitives, losses, retrievers | `nn` |
 
