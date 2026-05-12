@@ -20,7 +20,9 @@ _spectrawl_path = next(
     p for p in sys.path if (Path(p) / "spectrawl" / "data" / "molecules.py").exists()
 )
 _metabo_src_path = next(
-    p for p in sys.path if (Path(p) / "metabo_depthcharge" / "molecules.py").exists()
+    p
+    for p in sys.path
+    if (Path(p) / "metabo_depthcharge" / "molecules" / "fingerprints.py").exists()
 )
 
 orig = _load_from_file(
@@ -29,7 +31,7 @@ orig = _load_from_file(
 )
 new = _load_from_file(
     "metabo_molecules",
-    Path(_metabo_src_path) / "metabo_depthcharge" / "molecules.py",
+    Path(_metabo_src_path) / "metabo_depthcharge" / "molecules" / "fingerprints.py",
 )
 
 

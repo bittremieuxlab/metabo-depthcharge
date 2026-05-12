@@ -1,10 +1,10 @@
-"""Characterization tests for metabo_depthcharge.spectrum vs spectrawl."""
+"""Characterization tests for metabo_depthcharge.spectra vs spectrawl."""
 
 import numpy as np
 import pytest
 import spectrawl.data.spectra as orig
 
-import metabo_depthcharge.spectrum as new
+import metabo_depthcharge.spectra as new
 
 
 MZ = np.array([50.0, 100.0, 200.0, 300.0, 400.0, 500.0, 1500.0, 2500.0])

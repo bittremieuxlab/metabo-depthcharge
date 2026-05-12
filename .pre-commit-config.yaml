@@ -27,9 +27,6 @@ repos:
       - id: mixed-line-ending
         args: [--fix=lf]
 
-default_language_version:
-  python: python3.11
-
 exclude: |
   (?x)^(
       .*\.egg-info/.*|
