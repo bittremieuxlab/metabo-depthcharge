@@ -1,6 +1,6 @@
-"""Spectra: MS/MS preprocessing primitives and (eventually) datasets."""
+"""Spec: MS/MS preprocessing primitives and (eventually) datasets."""
 
-from metabo_depthcharge.spectra.preprocessing import (
+from metabo_depthcharge.spec.preprocessing import (
     DefaultSpectrumProcessor,
     Normalizer,
     PeakFilter,

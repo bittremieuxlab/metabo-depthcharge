@@ -11,7 +11,7 @@ from torch.nn.utils.rnn import pad_sequence
 from tqdm.auto import tqdm
 
 from metabo_depthcharge.datasets._common import hf_silent, hf_tempcache, infer_value
-from metabo_depthcharge.spectra.preprocessing import Spectrum
+from metabo_depthcharge.spec.preprocessing import Spectrum
 
 
 def read_mgf(path: str | PathLike) -> Iterable[Spectrum]:
@@ -135,7 +135,7 @@ class SpectrumDataset(torch.utils.data.Dataset):
         processor : Callable[[Spectrum], Spectrum], optional
             Build-time preprocessor applied once per spectrum and baked
             into the Arrow output. ``None`` (default) skips preprocessing;
-            pass :data:`~metabo_depthcharge.spectra.preprocessing.DefaultSpectrumProcessor`
+            pass :data:`~metabo_depthcharge.spec.preprocessing.DefaultSpectrumProcessor`
             (or a custom callable) to opt in.
         transform : Callable[[Spectrum], Spectrum], optional
             Iteration-time transform stored on the returned dataset.

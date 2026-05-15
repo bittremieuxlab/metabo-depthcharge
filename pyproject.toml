@@ -20,17 +20,13 @@ dependencies = [
     "pyteomics>=4.6",
     "biosynfoni>=1.0.0",
     "map4>=1.1.0",
-]
-
-[project.optional-dependencies]
-nn = [
     "torch>=2.0.0",
     "lightning>=2.0.0",
     "depthcharge-ms @ git+https://github.com/wfondrie/depthcharge.git@bd2861f",
     "transformers>=4.30.0",
-    "unimol_tools>=0.1.0",
 ]
 
+[project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",

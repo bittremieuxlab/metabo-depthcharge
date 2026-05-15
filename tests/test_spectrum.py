@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
+import torch
 
-from metabo_depthcharge.spectra import (
+from metabo_depthcharge.datasets.spectra import SpectrumDataset
+from metabo_depthcharge.spec import (
     DefaultSpectrumProcessor,
     Normalizer,
     PeakFilter,
@@ -88,10 +90,116 @@ def test_default_spectrum_processor():
 
 
 def test_torch():
-    pytest.importorskip("torch")
-    import torch
-
     t = make_spectrum().torch()
     assert set(t.keys()) == {"mz", "intensity"}
     assert t["mz"].shape[-1] == 8
     assert t["intensity"].dtype == torch.float32
+
+
+# --- SpectrumDataset ----------------------------------------------------
+
+
+def _spectra_factory():
+    """Yield three small spectra; reusable factory for from_spectra."""
+
+    def gen():
+        yield Spectrum(mz=MZ.copy(), intensity=INTENSITY.copy(), metadata={"id": "a"})
+        yield Spectrum(
+            mz=np.array([100.0, 200.0]),
+            intensity=np.array([1.0, 2.0]),
+            metadata={"id": "b"},
+        )
+        yield Spectrum(
+            mz=np.array([300.0]),
+            intensity=np.array([5.0]),
+            metadata={"id": "c"},
+        )
+
+    return gen
+
+
+def _make_mgf(path):
+    """Write a minimal 2-spectrum MGF file."""
+    path.write_text(
+        "BEGIN IONS\n"
+        "TITLE=spec_one\n"
+        "PEPMASS=200.0\n"
+        "50.0 5.0\n"
+        "100.0 10.0\n"
+        "END IONS\n"
+        "BEGIN IONS\n"
+        "TITLE=spec_two\n"
+        "PEPMASS=300.0\n"
+        "75.0 3.0\n"
+        "150.0 8.0\n"
+        "250.0 4.0\n"
+        "END IONS\n"
+    )
+
+
+@pytest.fixture
+def tiny_mgf(tmp_path):
+    path = tmp_path / "tiny.mgf"
+    _make_mgf(path)
+    return path
+
+
+def test_from_spectra_basic():
+    from datasets import Value as HFValue
+
+    ds = SpectrumDataset.from_spectra(
+        _spectra_factory(),
+        metadata={"id": HFValue("string")},
+    )
+    assert len(ds) == 3
+    row = ds[0]
+    assert "mz" in row and "intensity" in row
+    assert row["id"] == "a"
+
+
+def test_from_spectra_with_processor():
+    from datasets import Value as HFValue
+
+    ds = SpectrumDataset.from_spectra(
+        _spectra_factory(),
+        metadata={"id": HFValue("string")},
+        processor=Normalizer(),
+    )
+    # Normalized → max intensity is 1.0 per row.
+    assert np.isclose(float(ds[0]["intensity"].max()), 1.0)
+
+
+def test_from_mgf_basic(tiny_mgf):
+    ds = SpectrumDataset.from_mgf(tiny_mgf)
+    assert len(ds) == 2
+    row = ds[0]
+    assert "mz" in row and "intensity" in row
+    np.testing.assert_array_equal(row["mz"].numpy(), [50.0, 100.0])
+
+
+def test_spectrum_dataset_from_disk_round_trip(tiny_mgf, tmp_path):
+    saved = tmp_path / "saved_spec"
+    ds = SpectrumDataset.from_mgf(tiny_mgf, save_to=saved)
+    reloaded = SpectrumDataset.from_disk(saved)
+    assert len(reloaded) == len(ds)
+    assert reloaded.ds.column_names == ds.ds.column_names
+    np.testing.assert_array_equal(reloaded[0]["mz"].numpy(), ds[0]["mz"].numpy())
+
+
+def test_spectrum_dataset_filter(tiny_mgf):
+    ds = SpectrumDataset.from_mgf(tiny_mgf)
+    only_one = ds.filter(lambda r: len(r["mz"]) == 2)
+    assert isinstance(only_one, SpectrumDataset)
+    assert len(only_one) == 1
+
+
+def test_spectrum_dataset_collate_pads_ragged(tiny_mgf):
+    ds = SpectrumDataset.from_mgf(tiny_mgf)
+    batch = ds.collate([ds[0], ds[1]])
+    # Two rows: first has 2 peaks, second has 3 → padded to L=3.
+    assert batch["mz"].shape == (2, 3)
+    assert batch["intensity"].shape == (2, 3)
+    assert batch["mask"].shape == (2, 3)
+    # Mask should mark trailing pad as False on the shorter row.
+    assert batch["mask"][0].tolist() == [True, True, False]
+    assert batch["mask"][1].tolist() == [True, True, True]

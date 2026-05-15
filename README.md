@@ -4,16 +4,16 @@ Shared metabolomics library for depthcharge-based MS/MS retrieval models.
 
 ## Modules
 
-Layout follows [depthcharge](https://github.com/wfondrie/depthcharge) — organized by *role*, not by data type. Heavy ML deps are gated behind the optional `nn` extra.
+Layout inspired by [depthcharge](https://github.com/wfondrie/depthcharge) — organized by *role*, not by data type. Role folders are named `spec/` and `chem/` (rather than `spectra/`, `molecules/`) so they don't collide path-wise with the `datasets/spectra.py` / `datasets/molecules.py` wrappers. All ML deps (torch, lightning, depthcharge-ms, transformers) are required runtime dependencies; only `dev` is an optional extra.
 
-| Path | Contents | Deps |
-|---|---|---|
-| `spectra/` | Spectrum object, preprocessing primitives, (later) HF dataset loaders | base |
-| `molecules/` | SMILES utilities, fingerprint extractors, similarity metrics (Tanimoto, cosine, MCES) | base |
-| `tokenizers/` | m/z bucketing, SMILES, subformula tokenizers | base |
-| `datasets/` | HF Datasets-backed loaders for spectra and molecules | base |
-| `encoders/` | Neural encoders (spectrum, molecule, metadata, subformula) | `nn` |
-| `nn/` | Shared model machinery: primitives, losses, retrievers | `nn` |
+| Path | Contents |
+|---|---|
+| `spec/` | Spectrum object, preprocessing primitives, (later) HF dataset loaders |
+| `chem/` | `Molecule` wrapper, SMILES standardization, molecule-to-vector representations (fingerprints + neural embeddings), similarity metrics (Tanimoto, cosine, MCES) |
+| `tokenizers/` | m/z bucketing, SMILES, subformula tokenizers |
+| `datasets/` | HF Datasets-backed loaders for spectra and molecules |
+| `encoders/` | Neural encoders (spectrum, molecule, metadata, subformula) |
+| `nn/` | Shared model machinery: primitives, losses, retrievers |
 
 ## Development setup
 
