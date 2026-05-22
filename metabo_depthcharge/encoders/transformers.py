@@ -1,10 +1,9 @@
-import types
-
 import torch
 import torch.nn as nn
 from depthcharge.encoders import FloatEncoder
 from depthcharge.transformers import SpectrumTransformerEncoder
-from spectrawl.data.metadata import N_ADDUCTS, N_INSTRUMENTS
+
+from metabo_depthcharge.data.metadata import N_ADDUCTS, N_INSTRUMENTS
 
 
 class MetadataEncoder(nn.Module):
@@ -193,7 +192,6 @@ class DepthchargeEncoder(SpectrumTransformerEncoder):
         dropout: Dropout rate.
         min_mz_wavelength: Min wavelength for m/z positional encoding.
         max_mz_wavelength: Max wavelength for m/z positional encoding.
-        rotary_embedding: Optional RotaryEmbedding instance.
         pool: Pooling method - 'attention' or 'cls'.
         d_out: Output embedding dimension (after projection).
         n_proj_layers: Number of residual projection blocks (0 = linear only).
@@ -206,7 +204,6 @@ class DepthchargeEncoder(SpectrumTransformerEncoder):
         dropout=0.15,
         min_mz_wavelength=0.001,
         max_mz_wavelength=10_000,
-        rotary_embedding=None,
         pool="attention",
         d_out=512,
         n_proj_layers=0,
@@ -224,8 +221,6 @@ class DepthchargeEncoder(SpectrumTransformerEncoder):
                 min_mz_wavelength=min_mz_wavelength,
                 max_mz_wavelength=max_mz_wavelength,
             ),
-            attention_backend="sdpa",
-            rotary_embedding=rotary_embedding,
         )
 
         self.precursor_cls = nn.Embedding(1, d_model)
@@ -279,14 +274,8 @@ class DepthchargeEncoder(SpectrumTransformerEncoder):
 
         peaks = torch.cat([latent_spectra[:, None, :], peaks], dim=1)
 
-        global_pos = precursor_mz[:, None]  # (batch, 1)
-        positions = torch.cat([global_pos, mz], dim=1)
-
         out = self.transformer_encoder(
-            peaks,
-            mask=None,
-            src_key_padding_mask=src_key_padding_mask,
-            positions=positions,
+            peaks, mask=None, src_key_padding_mask=src_key_padding_mask
         )
 
         if self.pool_mode == "cls":
@@ -309,265 +298,3 @@ class DepthchargeEncoder(SpectrumTransformerEncoder):
             :, 0
         ]
         return precursor_cls_embedding + precursor_mz_embedding
-
-
-class DreaMSEncoder(nn.Module):
-    """Spectrum encoder wrapping the pre-trained DreaMS model.
-
-    forward(mz, intensity, precursor_mz) -> (B, d_out)
-
-    Args:
-        d_out: Output embedding dimension (after projection from DreaMS hidden dim).
-        dropout: dropout rate (default 0.15)
-        dreams_ckpt: Path to DreaMS checkpoint. None initializes from scratch.
-        n_highest_peaks: Number of highest intensity peaks to keep (default 60).
-        freeze_backbone: If True, freeze all DreaMS backbone parameters.
-        unfreeze_last_n: Number of last transformer layers to unfreeze.
-        pool: Pooling method - 'cls' (precursor token), 'mean', or 'attention'.
-        n_proj_layers: Number of residual projection blocks (0 = linear only).
-    """
-
-    DREAMS_HIDDEN = 1024  # default d_model of the pretrained DreaMS checkpoint
-
-    def __init__(
-        self,
-        d_out=512,
-        dropout=0.15,
-        dreams_ckpt=None,
-        n_highest_peaks=60,
-        freeze_backbone=True,
-        unfreeze_last_n=0,
-        pool="cls",
-        n_proj_layers=0,
-        metadata_encoder=None,
-    ):
-        super().__init__()
-        self.n_highest_peaks = n_highest_peaks
-        self.pool_mode = pool
-        self.freeze_backbone = freeze_backbone
-        self.metadata_encoder = metadata_encoder
-
-        # Load DreaMS model (lazy import)
-        self.dreams = self._load_dreams(dreams_ckpt, n_highest_peaks)
-        dreams_dim = getattr(
-            self.dreams,
-            "embed_dim",
-            getattr(self.dreams, "d_model", self.DREAMS_HIDDEN),
-        )
-
-        # Apply monkey-patch for device fix
-        self._patch_normalize_spec()
-
-        # Freeze backbone
-        if freeze_backbone:
-            for p in self.dreams.parameters():
-                p.requires_grad = False
-
-        # Selectively unfreeze last N layers
-        if unfreeze_last_n > 0:
-            self._unfreeze_last_n(unfreeze_last_n)
-
-        # Pooling
-        if pool == "attention":
-            self.aggregator = AttnAggregator(dreams_dim)
-        else:
-            self.aggregator = None
-
-        # Projection: dreams_dim -> d_out with optional residual blocks
-        self.proj = ResidualProjection(
-            dreams_dim, d_out, n_layers=n_proj_layers, dropout=dropout
-        )
-
-    @staticmethod
-    def _load_dreams(dreams_ckpt, n_highest_peaks):
-        # Shim unused transitive imports that dreams pulls in at module level.
-        # These are never called in our code path (PreTrainedModel / DreaMS
-        # forward), but their absence causes ImportError on `import dreams`.
-        import sys
-
-        class _StubModule(types.ModuleType):
-            def __init__(self, name):
-                super().__init__(name)
-                self.__path__ = []
-                self.__package__ = name
-                self.__file__ = f"<stub:{name}>"
-
-            def __getattr__(self, name):
-                return None
-
-        for _mod in (
-            "matchms",
-            "matchms.filtering",
-            "matchms.exporting",
-            "matchms.importing",
-            "matchms.similarity",
-            "plotly",
-            "plotly.graph_objects",
-            "plotly.graph_objs",
-            "ase",
-            "wandb",
-            "pyopenms",
-        ):
-            sys.modules.setdefault(_mod, _StubModule(_mod))
-
-        from dreams.api import PreTrainedModel
-        from dreams.models.dreams.dreams import DreaMS as DreaMSModel
-
-        if dreams_ckpt is not None:
-            # DreaMS checkpoints were saved with old PyTorch and contain
-            # arbitrary pickled objects. Temporarily patch torch.load to
-            # use weights_only=False for this load only.
-            _orig_load = torch.load
-            torch.load = lambda *a, **kw: _orig_load(
-                *a, **{**kw, "weights_only": False}
-            )
-            try:
-                ptm = PreTrainedModel.from_ckpt(
-                    ckpt_path=dreams_ckpt,
-                    ckpt_cls=DreaMSModel,
-                    n_highest_peaks=n_highest_peaks,
-                )
-            finally:
-                torch.load = _orig_load
-            model = ptm.model
-        else:
-            # Initialize from scratch (for testing / random init)
-            from argparse import Namespace
-            from pathlib import Path
-
-            import dreams.utils.data as du
-            from dreams.utils.dformats import DataFormatA
-
-            dformat = DataFormatA()
-            args = Namespace(
-                gains_dir=Path("."),
-                n_layers=7,
-                n_heads=8,
-                train_objective="mask_mz_hot",
-                lr=1e-4,
-                weight_decay=0.0,
-                charge_feature=False,
-                d_fourier=980,
-                d_peak=44,
-                d_mz_token=0,
-                dformat=dformat,
-                hot_mz_bin_size=0.05,
-                n_warmup_steps=5000,
-                vanilla_transformer=False,
-                batch_size=32,
-                log_figs=False,
-                entropy_label_smoothing=0.0,
-                graphormer_mz_diffs=True,
-                graphormer_parametrized=False,
-                fourier_strategy="lin_float_int",
-                ret_order_loss_w=0.0,
-                cos_reg_alpha=0.0,
-                cos_reg_reduction=None,
-                mask_val=-1.0,
-                fourier_num_freqs=None,
-                fourier_trainable=False,
-                fourier_min_freq=None,
-                dropout=0.1,
-                focal_loss_gamma=5.0,
-                focal_loss_alpha=None,
-                att_dropout=0.1,
-                residual_dropout=0.1,
-                ff_dropout=0.1,
-                ff_fourier_depth=5,
-                ff_fourier_d=512,
-                ff_peak_depth=1,
-                ff_out_depth=1,
-                no_ffs_bias=False,
-                no_transformer_bias=True,
-                pre_norm=True,
-                scnorm=False,
-                attn_mech="dot-product",
-            )
-            spec_preproc = du.SpectrumPreprocessor(
-                dformat=dformat,
-                n_highest_peaks=n_highest_peaks,
-            )
-            model = DreaMSModel(args, spec_preproc)
-            model.embed_dim = model.d_model
-            model = PreTrainedModel.remove_unused_backbone_parameters(model)
-
-        model.embed_dim = getattr(model, "embed_dim", model.d_model)
-        return model
-
-    def _patch_normalize_spec(self):
-        """Monkey-patch __normalize_spec to use input tensor's device/dtype."""
-        if not hasattr(self.dreams, "_normalize_spec_patched"):
-
-            def patched_normalize(self, spec):
-                return spec / torch.tensor(
-                    [self.dformat.max_mz, 1.0],
-                    device=spec.device,
-                    dtype=spec.dtype,
-                )
-
-            self.dreams._DreaMS__normalize_spec = types.MethodType(
-                patched_normalize, self.dreams
-            )
-            self.dreams._normalize_spec_patched = True
-
-    def _unfreeze_last_n(self, n):
-        te = self.dreams.transformer_encoder
-        if hasattr(te, "atts") and isinstance(te.atts, nn.ModuleList):
-            for layer in te.atts[-n:]:
-                for p in layer.parameters():
-                    p.requires_grad = True
-        if hasattr(te, "ffs") and isinstance(te.ffs, nn.ModuleList):
-            for layer in te.ffs[-n:]:
-                for p in layer.parameters():
-                    p.requires_grad = True
-
-    def _prepare_input(self, mz, intensity, precursor_mz):
-        """Stack mz+intensity, prepend precursor token, truncate."""
-        # (B, L, 2)
-        peaks = torch.stack([mz, intensity], dim=-1)
-
-        # Prepend precursor token: (precursor_mz, 1.1)
-        precursor_token = torch.stack(
-            [precursor_mz, torch.full_like(precursor_mz, 1.1)], dim=-1
-        ).unsqueeze(1)  # (B, 1, 2)
-        peaks = torch.cat([precursor_token, peaks], dim=1)  # (B, L+1, 2)
-
-        # Truncate to n_highest_peaks + 1 (precursor token + peaks)
-        max_len = self.n_highest_peaks + 1
-        if peaks.shape[1] > max_len:
-            peaks = peaks[:, :max_len, :]
-
-        return peaks
-
-    def forward(self, mz, intensity, precursor_mz, metadata=None):
-        peaks = self._prepare_input(mz, intensity, precursor_mz)
-
-        # Determine grad context
-        use_no_grad = not any(p.requires_grad for p in self.dreams.parameters())
-
-        if use_no_grad:
-            with torch.no_grad():
-                out = self.dreams(peaks)  # (B, L, D)
-        else:
-            out = self.dreams(peaks)  # (B, L, D)
-
-        # Pool
-        if self.pool_mode == "cls":
-            pooled = out[:, 0, :]
-        elif self.pool_mode == "mean":
-            # Masked mean over non-padding positions
-            mask = (peaks[..., 0] > 0).float()  # (B, L)
-            denom = mask.sum(dim=1, keepdim=True).clamp(min=1.0)
-            pooled = (out * mask.unsqueeze(-1)).sum(dim=1) / denom
-        elif self.pool_mode == "attention":
-            # Build mask: True = padding (to match AttnAggregator convention)
-            pad_mask = peaks[..., 0] == 0  # (B, L)
-            pooled = self.aggregator(out, mask=pad_mask)
-        else:
-            raise ValueError(f"Unknown pool mode: {self.pool_mode}")
-
-        # Add metadata embedding after pooling, before projection
-        if self.metadata_encoder is not None and metadata is not None:
-            pooled = pooled + self.metadata_encoder(metadata).to(pooled.dtype)
-
-        return self.proj(pooled)
