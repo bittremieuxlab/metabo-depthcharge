@@ -149,7 +149,7 @@ def test_from_spectra_basic():
 
     ds = SpectrumDataset.from_spectra(
         _spectra_factory(),
-        metadata={"id": HFValue("string")},
+        columns={"id": HFValue("string")},
     )
     assert len(ds) == 3
     row = ds[0]
@@ -162,7 +162,7 @@ def test_from_spectra_with_processor():
 
     ds = SpectrumDataset.from_spectra(
         _spectra_factory(),
-        metadata={"id": HFValue("string")},
+        columns={"id": HFValue("string")},
         processor=Normalizer(),
     )
     # Normalized → max intensity is 1.0 per row.
@@ -191,6 +191,90 @@ def test_spectrum_dataset_filter(tiny_mgf):
     only_one = ds.filter(lambda r: len(r["mz"]) == 2)
     assert isinstance(only_one, SpectrumDataset)
     assert len(only_one) == 1
+
+
+def test_metadata_fields_encoded_and_batched():
+    def factory():
+        yield Spectrum(
+            mz=MZ.copy(),
+            intensity=INTENSITY.copy(),
+            metadata={
+                "adduct": "[M+H]+",
+                "collision_energy": "20",
+                "instrument_type": "Orbitrap",
+            },
+        )
+        yield Spectrum(
+            mz=np.array([100.0, 200.0]),
+            intensity=np.array([1.0, 2.0]),
+            metadata={
+                "adduct": "[M-H]-",
+                "collision_energy": "10 20 30",
+                "instrument_type": "qtof",
+            },
+        )
+        yield Spectrum(
+            mz=np.array([300.0]),
+            intensity=np.array([5.0]),
+            metadata={},  # all missing
+        )
+
+    ds = SpectrumDataset.from_spectra(
+        lambda: factory(),
+        metadata=["adduct", "collision_energy", "instrument_type"],
+    )
+    # Canonical scalar dtypes.
+    assert ds.ds.features["adduct"].dtype == "int64"
+    assert ds.ds.features["collision_energy"].dtype == "float32"
+    assert ds.ds.features["instrument_type"].dtype == "int64"
+
+    # Values: known adducts/instruments → nonzero; missing row → 0.
+    assert int(ds[0]["adduct"]) == 1  # [M+H]+ → index 1
+    assert int(ds[1]["adduct"]) == 6  # [M-H]- → index 6
+    assert int(ds[2]["adduct"]) == 0
+    # CE divided by 100; stepped CE is mean/100 = 20/100 = 0.2.
+    assert float(ds[0]["collision_energy"]) == pytest.approx(0.2)
+    assert float(ds[1]["collision_energy"]) == pytest.approx(0.2)
+    assert float(ds[2]["collision_energy"]) == 0.0
+    assert int(ds[0]["instrument_type"]) == 1  # orbitrap → 1
+    assert int(ds[1]["instrument_type"]) == 2  # qtof → 2
+    assert int(ds[2]["instrument_type"]) == 0
+
+    # Collate nests metadata into a sub-dict of stacked tensors.
+    batch = ds.collate([ds[0], ds[1], ds[2]])
+    assert "metadata" in batch
+    md = batch["metadata"]
+    assert set(md) == {"adduct", "collision_energy", "instrument_type"}
+    assert md["adduct"].shape == (3,)
+    assert md["adduct"].dtype == torch.int64
+    assert md["collision_energy"].dtype == torch.float32
+    assert md["instrument_type"].dtype == torch.int64
+    assert md["adduct"].tolist() == [1, 6, 0]
+
+
+def test_metadata_feeds_metadata_encoder():
+    from metabo_depthcharge.encoders.transformers import MetadataEncoder
+
+    def factory():
+        yield Spectrum(
+            mz=MZ.copy(),
+            intensity=INTENSITY.copy(),
+            metadata={"adduct": "[M+H]+", "collision_energy": "20"},
+        )
+        yield Spectrum(
+            mz=np.array([100.0, 200.0]),
+            intensity=np.array([1.0, 2.0]),
+            metadata={"adduct": "[M-H]-", "collision_energy": "40"},
+        )
+
+    ds = SpectrumDataset.from_spectra(
+        lambda: factory(),
+        metadata=["adduct", "collision_energy"],
+    )
+    batch = ds.collate([ds[0], ds[1]])
+    enc = MetadataEncoder(d_model=16, metadata_fields=["adduct", "collision_energy"])
+    out = enc(batch["metadata"])
+    assert out.shape == (2, 16)
 
 
 def test_spectrum_dataset_collate_pads_ragged(tiny_mgf):

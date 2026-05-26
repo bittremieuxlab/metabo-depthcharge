@@ -8,6 +8,7 @@ Provides vocabularies and encoding functions for:
 """
 
 import numpy as np
+from datasets import Value
 
 
 # Adduct vocabulary: index 0 is reserved for unknown/other.
@@ -104,6 +105,17 @@ def parse_collision_energy(raw) -> float:
                 return float(np.mean(vals)) / 100
 
     return 0.0
+
+
+# Per-field (row-wise parser, HF dtype) for the NN-encoded metadata fields.
+# Single source of truth: consumed by SpectrumDataset (build-time encoding into
+# typed Arrow columns) and by MetadataEncoder (the only fields it ever reads).
+METADATA_PARSERS = {
+    "adduct": (encode_adduct, Value("int64")),
+    "collision_energy": (parse_collision_energy, Value("float32")),
+    "instrument_type": (encode_instrument, Value("int64")),
+}
+assert list(METADATA_PARSERS) == METADATA_FIELDS
 
 
 def encode_metadata_arrays(

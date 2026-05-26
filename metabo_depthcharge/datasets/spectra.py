@@ -11,6 +11,7 @@ from torch.nn.utils.rnn import pad_sequence
 from tqdm.auto import tqdm
 
 from metabo_depthcharge.datasets._common import hf_silent, hf_tempcache, infer_value
+from metabo_depthcharge.spec.metadata_parsers import METADATA_FIELDS, METADATA_PARSERS
 from metabo_depthcharge.spec.preprocessing import Spectrum
 
 
@@ -33,7 +34,7 @@ def read_mgf(path: str | PathLike) -> Iterable[Spectrum]:
     Standard MGF fields (``pepmass``, ``charge``, ``rtinseconds``) are parsed
     by pyteomics into their native types; other custom headers pass through
     as strings and are cast by HF Datasets to the dtype declared via
-    :meth:`SpectrumDataset.from_mgf`'s ``metadata`` argument.
+    :meth:`SpectrumDataset.from_mgf`'s ``columns`` and ``metadata`` arguments.
     """
     for s in read(str(path), use_index=False):
         yield Spectrum(
@@ -43,8 +44,8 @@ def read_mgf(path: str | PathLike) -> Iterable[Spectrum]:
         )
 
 
-def _sniff_mgf_metadata(path: str | PathLike, n: int = 1000) -> dict[str, Value]:
-    """Infer a metadata schema from the first ``n`` spectra of an MGF.
+def _sniff_mgf_columns(path: str | PathLike, n: int = 1000) -> dict[str, Value]:
+    """Infer a column schema from the first ``n`` spectra of an MGF.
 
     Walks up to ``n`` spectra, taking the union of their ``params`` keys
     and inferring a :class:`Value` dtype from the first observed value of
@@ -112,7 +113,8 @@ class SpectrumDataset(torch.utils.data.Dataset):
         cls,
         spectra: Callable[[], Iterable[Spectrum]],
         *,
-        metadata: dict[str, Value] | None = None,
+        metadata: list[str] | None = None,
+        columns: dict[str, Value] | None = None,
         processor: Callable[[Spectrum], Spectrum] | None = None,
         transform: Callable[[Spectrum], Spectrum] | None = None,
         save_to: str | PathLike | None = None,
@@ -128,10 +130,17 @@ class SpectrumDataset(torch.utils.data.Dataset):
             because HF Datasets pickles the source to compute its cache
             fingerprint and may re-invoke it; a primed generator is not
             picklable.
-        metadata : dict[str, datasets.Value], optional
-            Mapping from metadata key (lowercased) to HF :class:`Value`
-            dtype. Each entry becomes a top-level column alongside ``mz``
-            and ``intensity``; missing keys per spectrum yield ``None``.
+        metadata : list[str], optional
+            Any of: {``adduct``, ``collision_energy``, ``instrument_type``}.
+            Metadata fields to be parsed and processed by the neural network encoders.
+            See :class:`~metabo_depthcharge.encoders.transformers.MetadataEncoder`.
+            ``None`` (default) means no metadata parsing.
+        columns : dict[str, datasets.Value], optional
+            Passthrough columns: ``Spectrum.metadata`` key → HF
+            :class:`Value` dtype. Missing keys per spectrum yield
+            ``None``. Keys in :data:`METADATA_FIELDS` are reserved for
+            ``metadata=`` and must not appear here. ``None`` (default)
+            means no passthrough columns.
         processor : Callable[[Spectrum], Spectrum], optional
             Build-time preprocessor applied once per spectrum and baked
             into the Arrow output. ``None`` (default) skips preprocessing;
@@ -157,29 +166,40 @@ class SpectrumDataset(torch.utils.data.Dataset):
         -------
         SpectrumDataset
         """
-        metadata = metadata or {}
+        metadata = list(metadata or [])
+        columns = dict(columns or {})
+        unknown = set(metadata) - set(METADATA_FIELDS)
+        if unknown:
+            raise ValueError(
+                f"Unknown metadata field(s) {sorted(unknown)}; allowed: {METADATA_FIELDS}"
+            )
+        collision = set(columns) & set(METADATA_FIELDS)
+        if collision:
+            raise ValueError(
+                f"Keys {sorted(collision)} are reserved for `metadata=`; "
+                f"remove them from `columns=`."
+            )
+
         features = Features(
             {
                 "mz": Sequence(Value("float64")),
                 "intensity": Sequence(Value("float32")),
-                **metadata,
+                **{k: METADATA_PARSERS[k][1] for k in metadata},
+                **columns,
             }
         )
-        keys = list(metadata)
-        str_keys = {
-            k
-            for k, v in metadata.items()
-            if isinstance(v, Value) and v.dtype == "string"
-        }
+        str_cols = {k for k, v in columns.items() if v.dtype == "string"}
 
         def gen():
             for s in tqdm(spectra(), desc="Parsing spectra", unit=" spectra"):
                 if processor is not None:
                     s = processor(s)
                 row = {"mz": s.mz, "intensity": s.intensity}
-                for k in keys:
+                for k in metadata:
+                    row[k] = METADATA_PARSERS[k][0](s.metadata.get(k))
+                for k in columns:
                     val = s.metadata.get(k)
-                    if k in str_keys and val is not None and not isinstance(val, str):
+                    if k in str_cols and val is not None and not isinstance(val, str):
                         val = str(val)
                     row[k] = val
                 yield row
@@ -202,7 +222,8 @@ class SpectrumDataset(torch.utils.data.Dataset):
         cls,
         path: str | PathLike,
         *,
-        metadata: dict[str, Value] | None = None,
+        metadata: list[str] | None = None,
+        columns: dict[str, Value] | None = None,
         processor: Callable[[Spectrum], Spectrum] | None = None,
         transform: Callable[[Spectrum], Spectrum] | None = None,
         save_to: str | PathLike | None = None,
@@ -214,14 +235,14 @@ class SpectrumDataset(torch.utils.data.Dataset):
         ----------
         path : str or PathLike
             Path to an MGF-format peak list.
-        metadata : dict[str, datasets.Value], optional
-            Schema for metadata columns. If ``None`` (default), the schema
-            is auto-inferred from the first 1000 spectra by
-            :func:`_sniff_mgf_metadata` — every key seen is captured, with
-            dtypes inferred from first-observed values and non-scalars
-            falling back to ``Value("string")``. Pass an explicit dict to
-            override (e.g. for typed access to ``pepmass`` /
-            ``rtinseconds``, or to restrict to a known subset).
+        metadata : list[str], optional
+            See :meth:`from_spectra`. Strictly opt-in: never auto-enabled.
+        columns : dict[str, datasets.Value], optional
+            See :meth:`from_spectra`. ``None`` (default) auto-sniffs the
+            schema from the first 1000 spectra via
+            :func:`_sniff_mgf_columns` (non-scalars fall back to
+            ``Value("string")``). Keys also listed in ``metadata`` are
+            dropped from the sniffed schema.
         processor : Callable[[Spectrum], Spectrum], optional
             See :meth:`from_spectra`.
         transform : Callable[[Spectrum], Spectrum], optional
@@ -236,11 +257,15 @@ class SpectrumDataset(torch.utils.data.Dataset):
         SpectrumDataset
         """
         path = str(path)
-        if metadata is None:
-            metadata = _sniff_mgf_metadata(path)
+        if columns is None:
+            columns = _sniff_mgf_columns(path)
+        for k in metadata or []:
+            columns.pop(k, None)
+
         return cls.from_spectra(
             lambda: read_mgf(path),
             metadata=metadata,
+            columns=columns,
             processor=processor,
             transform=transform,
             save_to=save_to,
@@ -302,11 +327,11 @@ class SpectrumDataset(torch.utils.data.Dataset):
         ----------
         predicate : Callable[[dict], bool]
             Row-wise predicate. The argument is a dict whose keys are the
-            dataset's columns (``mz``, ``intensity``, plus every metadata
-            column declared at build time). ``mz`` and ``intensity`` come
-            through as torch tensors (matching ``__getitem__``); metadata
-            values come through as native scalars (``str`` / ``float`` /
-            ``int``) per the schema.
+            dataset's columns (``mz``, ``intensity``, plus every column
+            declared via ``metadata=`` / ``columns=`` at build time).
+            ``mz`` and ``intensity`` come through as torch tensors
+            (matching ``__getitem__``); scalar columns come through as
+            native ``str`` / ``float`` / ``int`` per the schema.
         **kwargs
             Passed to :meth:`datasets.Dataset.filter`. Common knobs:
             ``num_proc=8`` for parallelism, ``batched=True`` if the
@@ -360,9 +385,14 @@ class SpectrumDataset(torch.utils.data.Dataset):
         Returns
         -------
         dict
-            ``mz`` and ``intensity`` as ``(B, L)`` torch tensors padded with
-            zeros, ``mask`` as a ``(B, L)`` bool tensor (``True`` at real
-            peaks). Non-spectrum columns pass through as Python lists.
+            ``mz`` and ``intensity`` as ``(B, L)`` torch tensors padded
+            with zeros, ``mask`` as a ``(B, L)`` bool tensor (``True`` at
+            real peaks). NN-encoded metadata fields (those declared via
+            ``metadata=`` at build time) are stacked into ``(B,)`` tensors
+            and nested under ``batch["metadata"]``, ready to pass directly
+            to :class:`MetadataEncoder`. Other tensor-valued columns are
+            stacked into ``(B,)`` tensors at the top level; string/object
+            columns pass through as Python lists.
         """
         mz = pad_sequence(
             [torch.as_tensor(r["mz"], dtype=torch.float64) for r in batch],
@@ -375,8 +405,16 @@ class SpectrumDataset(torch.utils.data.Dataset):
         lengths = torch.tensor([len(r["mz"]) for r in batch])
         mask = torch.arange(mz.size(1))[None, :] < lengths[:, None]
         out = {"mz": mz, "intensity": intensity, "mask": mask}
+        metadata = {}
         for k in batch[0]:
             if k in ("mz", "intensity"):
                 continue
-            out[k] = [r[k] for r in batch]
+            vals = [r[k] for r in batch]
+            stacked = torch.stack(vals) if isinstance(vals[0], torch.Tensor) else vals
+            if k in METADATA_FIELDS:
+                metadata[k] = stacked
+            else:
+                out[k] = stacked
+        if metadata:
+            out["metadata"] = metadata
         return out
