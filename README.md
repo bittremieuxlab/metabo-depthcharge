@@ -8,7 +8,7 @@ Layout inspired by [depthcharge](https://github.com/wfondrie/depthcharge) — or
 
 | Path | Contents |
 |---|---|
-| `spec/` | Spectrum object, preprocessing primitives, (later) HF dataset loaders |
+| `spec/` | Spectrum object, preprocessing primitives, parsers |
 | `chem/` | `Molecule` wrapper, SMILES standardization, molecule-to-vector representations (fingerprints + neural embeddings), similarity metrics (Tanimoto, cosine, MCES) |
 | `tokenizers/` | m/z bucketing, SMILES, subformula tokenizers |
 | `datasets/` | HF Datasets-backed loaders for spectra and molecules |
