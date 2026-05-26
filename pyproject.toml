@@ -24,7 +24,7 @@ dependencies = [
 nn = [
     "torch>=2.0.0",
     "lightning>=2.0.0",
-    "depthcharge-ms",
+    "depthcharge-ms>=0.4.9",
     "transformers>=4.30.0",
     "unimol_tools>=0.1.0",
 ]

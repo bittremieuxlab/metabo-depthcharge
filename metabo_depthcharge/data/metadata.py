@@ -60,7 +60,7 @@ def encode_instrument(instrument_str: str) -> int:
 
 
 def parse_collision_energy(raw) -> float:
-    """Parse a collision energy value to a float.
+    """Parse a collision energy value to a float. Divides by 100 for numerical stability.
 
     Handles:
     - Numeric values (int/float)
@@ -74,7 +74,7 @@ def parse_collision_energy(raw) -> float:
     if isinstance(raw, int | float | np.integer | np.floating):
         if np.isnan(raw):
             return 0.0
-        return float(raw)
+        return float(raw) / 100
 
     # String handling
     s = str(raw).strip()

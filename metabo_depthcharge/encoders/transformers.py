@@ -21,6 +21,8 @@ class MetadataEncoder(nn.Module):
 
     def __init__(self, d_model: int, metadata_fields: list[str]):
         super().__init__()
+        if len(metadata_fields) == 0:
+            raise ValueError("At least one metadata field must be enabled")
         self.metadata_fields = metadata_fields
 
         if "adduct" in metadata_fields:
