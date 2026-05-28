@@ -4,7 +4,7 @@ import functools
 import warnings
 from functools import cached_property
 
-from rdkit import Chem
+from rdkit import Chem, rdBase
 from rdkit.Chem import Descriptors, SanitizeFlags, rdMolDescriptors
 from rdkit.Chem.MolStandardize import rdMolStandardize
 
@@ -144,7 +144,7 @@ class Molecule:
         self,
         *,
         remove_stereo: bool = True,
-        uncharge: bool = True,
+        uncharge: bool = False,
         canonicalize_tautomers: bool = False,
     ) -> "Molecule | None":
         """Return a standardized copy, or ``None`` if RDKit can't clean it.
@@ -157,8 +157,8 @@ class Molecule:
         ----------
         remove_stereo : bool, default True
             Drop stereochemistry before standardizing.
-        uncharge : bool, default True
-            Neutralize charges via RDKit's ``Uncharger``.
+        uncharge : bool, default False
+            Neutralize charges via RDKit's ``Uncharger``, default False
         canonicalize_tautomers : bool, default False
             Run ``TautomerEnumerator.Canonicalize``.
 
@@ -177,6 +177,10 @@ class Molecule:
                 m = _uncharger().uncharge(m)
             if canonicalize_tautomers:
                 m = _tautomerizer().Canonicalize(m)
+            out_smi = Chem.MolToSmiles(m)
         except Exception:
             return None
-        return Molecule(Chem.MolToSmiles(m), mol=m)
+        with rdBase.BlockLogs():
+            if Chem.MolFromSmiles(out_smi) is None:
+                return None
+        return Molecule(out_smi, mol=m)

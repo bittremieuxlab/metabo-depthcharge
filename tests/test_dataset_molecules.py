@@ -76,9 +76,8 @@ def test_standardize_strips_salt():
         ["CC(=O)O.[Na]", CAFFEINE],
         standardize=True,
     )
-    # Salt counterion dropped; the cleaned acid is what survives.
     assert "[Na]" not in ds[0]["smiles"]
-    assert ds[0]["smiles"] == "CC(=O)O"
+    assert ds[0]["smiles"] == "CC(=O)[O-]"
 
 
 def test_standardize_drops_failed_rows():
@@ -164,14 +163,12 @@ def test_representations_unknown_name_raises(tiny_tsv):
 
 
 def test_properties_computed_on_post_standardize_smiles():
-    # The salt has formula C2H4O2.Na; cleaned, it's C2H4O2. If properties
-    # ran before standardize, we'd get the salt's formula.
     ds = MoleculeDataset.from_smiles(
         ["CC(=O)O.[Na]", CAFFEINE],
         standardize=True,
         properties=["formula"],
     )
-    assert ds[0]["formula"] == "C2H4O2"
+    assert ds[0]["formula"] == "C2H3O2-"
 
 
 # --- from_disk round-trip -----------------------------------------------

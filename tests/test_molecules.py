@@ -146,21 +146,24 @@ def test_standardize_returns_new_molecule(aspirin):
 
 
 def test_standardize_strips_salt_via_fragment_parent():
-    # CC(=O)O.[Na] should reduce to CC(=O)O (or the canonical equivalent).
+    # CC(=O)O.[Na] should reduce to the larger fragment. Default standardize
+    # (uncharge=False) keeps the charge state of that fragment as-is.
     out = Molecule("CC(=O)O.[Na]").standardize()
     assert out is not None
-    assert out.canonical_smiles == "CC(=O)O"
+    assert "[Na]" not in out.canonical_smiles
+    assert out.canonical_smiles == "CC(=O)[O-]"
 
 
-def test_standardize_uncharges_by_default():
-    # Carboxylate anion gets neutralized.
-    out = Molecule("CC(=O)[O-]").standardize()
+def test_standardize_uncharges_when_opted_in():
+    # Carboxylate anion neutralized only when uncharge=True (opt-in).
+    out = Molecule("CC(=O)[O-]").standardize(uncharge=True)
     assert out is not None
     assert out.canonical_smiles == "CC(=O)O"
 
 
-def test_standardize_preserves_charge_when_uncharge_false():
-    out = Molecule("CC(=O)[O-]").standardize(uncharge=False)
+def test_standardize_preserves_charge_by_default():
+    # Default uncharge=False keeps charges as the curator wrote them.
+    out = Molecule("CC(=O)[O-]").standardize()
     assert out is not None
     assert "-" in out.canonical_smiles  # still anionic
 

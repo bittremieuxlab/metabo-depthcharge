@@ -10,9 +10,19 @@ from metabo_depthcharge.chem.representations import (
     MoleculeToMorgan,
     MoleculeToRdkit,
 )
+from metabo_depthcharge.chem.similarities import (
+    BinaryTanimoto,
+    CosineSimilarity,
+    CountTanimoto,
+    MCESDistance,
+)
 
 
 __all__ = [
+    "BinaryTanimoto",
+    "CosineSimilarity",
+    "CountTanimoto",
+    "MCESDistance",
     "Molecule",
     "MoleculeToBiosynfoni",
     "MoleculeToChemBERTa",
