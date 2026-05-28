@@ -1,30 +1,20 @@
 """
 Metadata encoding utilities for spectrum acquisition conditions.
 
-Provides vocabularies and encoding functions for:
-- Adduct type (categorical index)
+Adduct handling (vocab, encoder, mass deltas) lives in
+:mod:`metabo_depthcharge.spec.adducts`. This module owns the rest:
 - Instrument type (categorical index)
 - Collision energy (scalar float)
+- The :data:`METADATA_PARSERS` registry consumed by ``SpectrumDataset``.
 """
 
 import numpy as np
 from datasets import Value
 
+# Used internally by METADATA_PARSERS and encode_metadata_arrays. Adduct
+# names should be imported from spec.adducts directly by external callers.
+from metabo_depthcharge.spec.adducts import encode_adduct
 
-# Adduct vocabulary: index 0 is reserved for unknown/other.
-ADDUCT_VOCAB = [
-    "[M+H]+",
-    "[M+Na]+",
-    "[M+K]+",
-    "[M+NH4]+",
-    "[M]+",
-    "[M-H]-",
-    "[M+Cl]-",
-    "[M+HCOOH-H]-",
-    "[M+CH3COOH-H]-",
-]
-_ADDUCT_TO_IDX = {a: i + 1 for i, a in enumerate(ADDUCT_VOCAB)}
-N_ADDUCTS = len(ADDUCT_VOCAB) + 1  # +1 for unknown at index 0
 
 # Instrument type vocabulary: index 0 is reserved for unknown.
 INSTRUMENT_TYPES = [
@@ -37,16 +27,6 @@ N_INSTRUMENTS = len(INSTRUMENT_TYPES) + 1  # +1 for unknown at index 0
 
 # All supported metadata field names.
 METADATA_FIELDS = ["adduct", "collision_energy", "instrument_type"]
-
-
-def encode_adduct(adduct_str: str) -> int:
-    """Encode an adduct string to a vocabulary index.
-
-    Returns 0 for unknown/missing adducts.
-    """
-    if not adduct_str or adduct_str in ("nan", "None", ""):
-        return 0
-    return _ADDUCT_TO_IDX.get(adduct_str.strip(), 0)
 
 
 def encode_instrument(instrument_str: str) -> int:

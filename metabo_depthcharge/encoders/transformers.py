@@ -3,7 +3,8 @@ import torch.nn as nn
 from depthcharge.encoders import FloatEncoder
 from depthcharge.transformers import SpectrumTransformerEncoder
 
-from metabo_depthcharge.spec.metadata_parsers import N_ADDUCTS, N_INSTRUMENTS
+from metabo_depthcharge.spec.adducts import N_ADDUCTS
+from metabo_depthcharge.spec.metadata_parsers import N_INSTRUMENTS
 
 
 class MetadataEncoder(nn.Module):
