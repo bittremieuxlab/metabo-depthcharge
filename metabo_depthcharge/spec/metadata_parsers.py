@@ -87,6 +87,47 @@ def parse_collision_energy(raw) -> float:
     return 0.0
 
 
+class CollapseSteppedCE:
+    """Spectrum processor: collapse suffixed CE keys into ``collision_energy``.
+
+    Some MGFs have stepped collision energy as ``COLLISION_ENERGY_1``,
+    ``COLLISION_ENERGY_2``. Or ``NORMALIZED_COLLISION_ENERGY_N`` variants.
+
+    Parameters
+    ----------
+    source : {"normalized", "absolute"}, default "normalized"
+        Which family to collapse. ``"normalized"`` matches
+        ``normalized_collision_energy_N``; ``"absolute"`` matches
+        ``collision_energy_N``. Pyteomics lowercases MGF keys.
+    """
+
+    def __init__(self, source: str = "normalized"):
+        if source not in ("normalized", "absolute"):
+            raise ValueError(
+                f"source must be 'normalized' or 'absolute', got {source!r}"
+            )
+        self._prefix = (
+            "normalized_collision_energy_"
+            if source == "normalized"
+            else "collision_energy_"
+        )
+
+    def __call__(self, spectrum):
+        vals = []
+        for k, v in spectrum.metadata.items():
+            if not k.lower().startswith(self._prefix):
+                continue
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if not np.isnan(f):
+                vals.append(f)
+        if vals:
+            spectrum.metadata["collision_energy"] = sum(vals) / len(vals)
+        return spectrum
+
+
 # Per-field (row-wise parser, HF dtype) for the NN-encoded metadata fields.
 # Single source of truth: consumed by SpectrumDataset (build-time encoding into
 # typed Arrow columns) and by MetadataEncoder (the only fields it ever reads).
