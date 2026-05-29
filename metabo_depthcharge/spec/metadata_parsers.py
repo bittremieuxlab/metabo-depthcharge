@@ -106,16 +106,17 @@ class CollapseSteppedCE:
             raise ValueError(
                 f"source must be 'normalized' or 'absolute', got {source!r}"
             )
-        self._prefix = (
-            "normalized_collision_energy_"
+        self._base = (
+            "normalized_collision_energy"
             if source == "normalized"
-            else "collision_energy_"
+            else "collision_energy"
         )
 
     def __call__(self, spectrum):
         vals = []
         for k, v in spectrum.metadata.items():
-            if not k.lower().startswith(self._prefix):
+            kl = k.lower()
+            if kl != self._base and not kl.startswith(self._base + "_"):
                 continue
             try:
                 f = float(v)
