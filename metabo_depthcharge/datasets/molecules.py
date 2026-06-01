@@ -230,8 +230,16 @@ class MoleculeDataset(torch.utils.data.Dataset):
             if needed:
 
                 def _props(batch):
-                    mols = [Molecule(s) for s in batch["smiles"]]
-                    return {p: [getattr(m, p) for m in mols] for p in needed}
+                    out = {p: [] for p in needed}
+                    for s in batch["smiles"]:
+                        try:
+                            m = Molecule(s)
+                            for p in needed:
+                                out[p].append(getattr(m, p))
+                        except Exception:
+                            for p in needed:
+                                out[p].append(None)
+                    return out
 
                 ds = ds.map(
                     _props,
@@ -241,6 +249,17 @@ class MoleculeDataset(torch.utils.data.Dataset):
                     keep_in_memory=in_memory,
                     desc="Computing properties",
                 )
+                before = len(ds)
+                ds = ds.filter(
+                    lambda r: r[needed[0]] is not None,
+                    num_proc=nproc,
+                    keep_in_memory=in_memory,
+                )
+                if (dropped := before - len(ds)) > 0:
+                    tqdm.write(
+                        f"Property computation dropped {dropped} row(s) "
+                        "with unparseable SMILES."
+                    )
 
             for name, kw in (representations or {}).items():
                 ds = cls._add_fingerprint_column(
