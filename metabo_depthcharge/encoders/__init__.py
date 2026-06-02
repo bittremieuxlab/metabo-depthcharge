@@ -6,6 +6,7 @@ from metabo_depthcharge.encoders.transformers import (
     MetadataEncoder,
     PeakEncoder,
     ResidualProjection,
+    SubformulaEncoder,
 )
 
 
@@ -15,4 +16,5 @@ __all__ = [
     "MetadataEncoder",
     "PeakEncoder",
     "ResidualProjection",
+    "SubformulaEncoder",
 ]

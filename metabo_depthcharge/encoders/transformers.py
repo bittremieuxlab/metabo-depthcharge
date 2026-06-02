@@ -3,6 +3,7 @@ import torch.nn as nn
 from depthcharge.encoders import FloatEncoder
 from depthcharge.transformers import SpectrumTransformerEncoder
 
+from metabo_depthcharge.mist_cf.nn_utils import get_embedder
 from metabo_depthcharge.spec.adducts import N_ADDUCTS
 from metabo_depthcharge.spec.metadata_parsers import N_INSTRUMENTS
 
@@ -248,8 +249,7 @@ class DepthchargeEncoder(SpectrumTransformerEncoder):
         mz,
         intensity,
         precursor_mz,
-        form_vec=None,
-        parent_form_vec=None,
+        subformulae=None,
         metadata=None,
     ):
         spectra = torch.stack([mz, intensity], dim=2)
@@ -264,8 +264,10 @@ class DepthchargeEncoder(SpectrumTransformerEncoder):
 
         peaks = self.peak_encoder(spectra)
 
-        if self.subformula_encoder is not None and form_vec is not None:
-            peaks = peaks + self.subformula_encoder(form_vec, parent_form_vec)
+        if self.subformula_encoder is not None and subformulae is not None:
+            peaks = peaks + self.subformula_encoder(
+                subformulae["form_vec"], subformulae["parent_form_vec"]
+            )
 
         latent_spectra = self.global_token_hook(
             mz_array=mz, intensity_array=intensity, precursor_mzs=precursor_mz
@@ -301,3 +303,51 @@ class DepthchargeEncoder(SpectrumTransformerEncoder):
             :, 0
         ]
         return precursor_cls_embedding + precursor_mz_embedding
+
+
+class SubformulaEncoder(nn.Module):
+    """Encode peak subformulae into d_model-dimensional embeddings.
+
+    Follows the MIST approach: embeds each peak's subformula bag-of-atoms
+    and its complement (``parent_formula - subformula``), concatenates both
+    embeddings, and projects to ``d_model``. The output is intended to be
+    added to :class:`PeakEncoder` output (additive fusion) inside
+    :class:`DepthchargeEncoder`.
+
+    Parameters
+    ----------
+    d_model : int
+        Output dimension; must match the transformer's ``d_model``.
+    form_embedder : str
+        MIST formula embedder type. Default ``"abs-sines"``; other choices:
+        ``"fourier"``, ``"fourier-sines"``, ``"rbf"``, ``"one-hot"``,
+        ``"learnt"``, ``"float"``.
+    """
+
+    def __init__(self, d_model: int, form_embedder: str = "abs-sines"):
+        super().__init__()
+        self.form_encoder = get_embedder(form_embedder)
+        self.proj = nn.Linear(self.form_encoder.full_dim * 2, d_model)
+
+    def forward(
+        self,
+        form_vec: torch.Tensor,
+        parent_form_vec: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        form_vec : torch.Tensor
+            ``(B, L, ELEMENT_DIM)`` int tensor — bag-of-atoms per peak.
+        parent_form_vec : torch.Tensor
+            ``(B, ELEMENT_DIM)`` int tensor — parent molecular formula.
+
+        Returns
+        -------
+        torch.Tensor
+            ``(B, L, d_model)`` float tensor.
+        """
+        diff_vec = parent_form_vec[:, None, :] - form_vec  # (B, L, ELEMENT_DIM)
+        form_emb = self.form_encoder(form_vec)  # (B, L, full_dim)
+        diff_emb = self.form_encoder(diff_vec)  # (B, L, full_dim)
+        return self.proj(torch.cat([form_emb, diff_emb], dim=-1))  # (B, L, d_model)
