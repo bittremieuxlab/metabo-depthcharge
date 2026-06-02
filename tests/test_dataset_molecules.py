@@ -266,3 +266,65 @@ def test_fp_info_build_returns_extractor_with_matching_size(name):
         pytest.skip("neural extractor: skip to avoid model download")
     extractor = spec["build"]()
     assert extractor.fp_size == spec["size"]
+
+
+# --- construct_mol_embedder factory -------------------------------------
+
+
+def test_construct_mol_embedder_single_binary_returns_mol_embedder(tiny_tsv):
+    from metabo_depthcharge.encoders.molecules import MolEmbedder
+
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t", representations={"morgan": {}})
+    enc = ds.construct_mol_embedder(["morgan"], n_layers=2, d_model=32)
+    assert isinstance(enc, MolEmbedder)
+    assert enc.fp_type == "binary"
+
+
+def test_construct_mol_embedder_single_count_has_max_counts(tiny_tsv):
+    ds = MoleculeDataset.from_csv(
+        tiny_tsv, sep="\t", representations={"morgan_count": {}}
+    )
+    enc = ds.construct_mol_embedder(["morgan_count"], n_layers=2, d_model=32)
+    assert enc.max_counts is not None
+    assert enc.max_counts.shape == (4096,)
+
+
+def test_construct_mol_embedder_count_no_max_counts_when_disabled(tiny_tsv):
+    ds = MoleculeDataset.from_csv(
+        tiny_tsv, sep="\t", representations={"morgan_count": {}}
+    )
+    enc = ds.construct_mol_embedder(
+        ["morgan_count"], n_layers=2, d_model=32, compute_max_counts=False
+    )
+    assert enc.max_counts is None
+
+
+def test_construct_mol_embedder_multi_returns_multi_mol_embedder(tiny_tsv):
+    from metabo_depthcharge.encoders.molecules import MultiMolEmbedder
+
+    ds = MoleculeDataset.from_csv(
+        tiny_tsv, sep="\t", representations={"morgan": {}, "maccs": {}}
+    )
+    enc = ds.construct_mol_embedder(["morgan", "maccs"], n_layers=2, d_model=32)
+    assert isinstance(enc, MultiMolEmbedder)
+    assert enc.fp_names == ["morgan", "maccs"]
+
+
+def test_construct_mol_embedder_forward_pass(tiny_tsv):
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t", representations={"morgan": {}})
+    enc = ds.construct_mol_embedder(["morgan"], n_layers=2, d_model=32)
+    batch = ds.collate([ds[i] for i in range(len(ds))])
+    out = enc(batch["morgan"])
+    assert out.shape == (len(ds), 32)
+
+
+def test_construct_mol_embedder_raises_on_missing_column(tiny_tsv):
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t")
+    with pytest.raises(ValueError, match="not found"):
+        ds.construct_mol_embedder(["morgan"], n_layers=2, d_model=32)
+
+
+def test_construct_mol_embedder_raises_on_unknown_fp(tiny_tsv):
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t")
+    with pytest.raises(ValueError, match="Unknown fingerprint"):
+        ds.construct_mol_embedder(["not_a_fp"], n_layers=2, d_model=32)

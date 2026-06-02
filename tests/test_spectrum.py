@@ -253,7 +253,7 @@ def test_metadata_fields_encoded_and_batched():
 
 
 def test_metadata_feeds_metadata_encoder():
-    from metabo_depthcharge.encoders.transformers import MetadataEncoder
+    from metabo_depthcharge.encoders.spectra import MetadataEncoder
 
     def factory():
         yield Spectrum(

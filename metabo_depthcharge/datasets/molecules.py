@@ -22,6 +22,7 @@ from metabo_depthcharge.chem.representations import (
     MoleculeToRdkit,
 )
 from metabo_depthcharge.datasets._common import hf_silent, hf_tempcache
+from metabo_depthcharge.encoders.molecules import MolEmbedder, MultiMolEmbedder
 
 
 _FP_INFO: dict[str, dict] = {
@@ -445,6 +446,96 @@ class MoleculeDataset(torch.utils.data.Dataset):
     def save_to(self, path: str | PathLike) -> None:
         """Persist the underlying HF Dataset to disk as Arrow shards."""
         self.ds.save_to_disk(str(path))
+
+    def construct_mol_embedder(
+        self,
+        fp_names: list[str],
+        n_layers: int,
+        d_model: int = 512,
+        *,
+        compute_max_counts: bool = True,
+    ):
+        """Build a :class:`~metabo_depthcharge.encoders.molecules.MolEmbedder`
+        or :class:`~metabo_depthcharge.encoders.molecules.MultiMolEmbedder`
+        wired to the fingerprint columns present in this dataset.
+
+        Parameters
+        ----------
+        fp_names : list[str]
+            One or more fingerprint column names (keys of :data:`_FP_INFO`).
+            A single-element list returns :class:`~metabo_depthcharge.encoders.molecules.MolEmbedder`;
+            two or more return :class:`~metabo_depthcharge.encoders.molecules.MultiMolEmbedder`.
+        n_layers : int
+            Depth passed to the underlying
+            :class:`~metabo_depthcharge.encoders.molecules.MolEmbedder`.
+        d_model : int, default 512
+            Output embedding dimension.
+        compute_max_counts : bool, default True
+            If ``True``, scan count-fingerprint columns to derive per-bit
+            ``max_counts`` tensors used for normalisation inside
+            :class:`~metabo_depthcharge.encoders.molecules.MolEmbedder`.
+
+        Returns
+        -------
+        MolEmbedder or MultiMolEmbedder
+        """
+
+        for name in fp_names:
+            if name not in _FP_INFO:
+                raise ValueError(
+                    f"Unknown fingerprint {name!r}; must be one of {sorted(_FP_INFO)}"
+                )
+            if name not in self.ds.column_names:
+                raise ValueError(
+                    f"Column {name!r} not found in this dataset; "
+                    "call add_fingerprint() first."
+                )
+
+        fp_types = [_FP_INFO[n]["kind"] for n in fp_names]
+        fp_sizes = [_FP_INFO[n]["size"] for n in fp_names]
+
+        max_counts: dict[str, torch.Tensor] = {}
+        if compute_max_counts:
+            for name, kind, size in zip(fp_names, fp_types, fp_sizes, strict=False):
+                if kind == "count":
+                    max_counts[name] = self._max_counts_from_sparse(self.ds, name, size)
+
+        if len(fp_names) == 1:
+            return MolEmbedder(
+                fp_size=fp_sizes[0],
+                n_layers=n_layers,
+                d_model=d_model,
+                fp_type=fp_types[0],
+                max_counts=max_counts.get(fp_names[0]),
+            )
+
+        return MultiMolEmbedder(
+            fp_names=fp_names,
+            fp_sizes=fp_sizes,
+            n_layers=n_layers,
+            d_model=d_model,
+            fp_types=fp_types,
+            max_counts=max_counts or None,
+        )
+
+    @staticmethod
+    def _max_counts_from_sparse(ds: Dataset, name: str, fp_size: int) -> torch.Tensor:
+        """Compute per-bit max count across all rows of a sparse count column."""
+        flat_idx = (
+            ds.data.column(name)
+            .combine_chunks()
+            .values.to_numpy(zero_copy_only=False)
+            .astype(np.intp)
+        )
+        flat_val = (
+            ds.data.column(f"{name}_values")
+            .combine_chunks()
+            .values.to_numpy(zero_copy_only=False)
+            .astype(np.float32)
+        )
+        max_c = np.zeros(fp_size, dtype=np.float32)
+        np.maximum.at(max_c, flat_idx, flat_val)
+        return torch.from_numpy(max_c)
 
     @staticmethod
     def _densify(

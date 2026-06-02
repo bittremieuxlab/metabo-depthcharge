@@ -114,7 +114,7 @@ class SpectrumDataset(torch.utils.data.Dataset):
         When ``True`` (requires ``subformulae_name``), each ``__getitem__``
         call reads the raw adduct from ``{subformulae_name}_adduct``, encodes
         it, and injects it as ``row["adduct"]`` for
-        :class:`~metabo_depthcharge.encoders.transformers.MetadataEncoder`.
+        :class:`~metabo_depthcharge.encoders.spectra.MetadataEncoder`.
         See :meth:`from_disk` for details.
 
     Attributes
@@ -178,7 +178,7 @@ class SpectrumDataset(torch.utils.data.Dataset):
             )
         if "precursor_mz" not in ds.column_names:
             warnings.warn(
-                "Dataset has no 'precursor_mz' column. DepthchargeEncoder requires it. "
+                "Dataset has no 'precursor_mz' column. SpectrumEmbedder requires it. "
                 "Build via from_mgf or from_spectra to include it automatically.",
                 stacklevel=2,
             )
@@ -213,7 +213,7 @@ class SpectrumDataset(torch.utils.data.Dataset):
         metadata : list[str], optional
             Any of: {``adduct``, ``collision_energy``, ``instrument_type``}.
             Metadata fields to be parsed and processed by the neural network encoders.
-            See :class:`~metabo_depthcharge.encoders.transformers.MetadataEncoder`.
+            See :class:`~metabo_depthcharge.encoders.spectra.MetadataEncoder`.
             ``None`` (default) means no metadata parsing.
         columns : dict[str, datasets.Value], optional
             Passthrough columns: ``Spectrum.metadata`` key → HF
@@ -397,7 +397,7 @@ class SpectrumDataset(torch.utils.data.Dataset):
             When ``True`` (requires ``subformulae_name``), ``__getitem__``
             reads the raw adduct from ``{subformulae_name}_adduct``, encodes
             it, and injects it as ``row["adduct"]`` for
-            :class:`~metabo_depthcharge.encoders.transformers.MetadataEncoder`.
+            :class:`~metabo_depthcharge.encoders.spectra.MetadataEncoder`.
 
         Returns
         -------
@@ -654,7 +654,7 @@ class SpectrumDataset(torch.utils.data.Dataset):
             - ``metadata``: dict of ``(B,)`` tensors for NN-encoded fields
               (``adduct``, ``collision_energy``, ``instrument_type``), present
               only when those columns exist. Ready to pass directly to
-              :class:`~metabo_depthcharge.encoders.transformers.MetadataEncoder`.
+              :class:`~metabo_depthcharge.encoders.spectra.MetadataEncoder`.
             - ``subformulae``: dict keyed by subformula set name, each value
               a dict ``{"form_vec": (B, L, ELEMENT_DIM), "parent_form_vec":
               (B, ELEMENT_DIM)}``. Present only when subformula columns exist.

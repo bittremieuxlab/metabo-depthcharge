@@ -1,19 +1,21 @@
 """Encoders: neural encoders for spectra, molecules, metadata, subformulae."""
 
-from metabo_depthcharge.encoders.transformers import (
-    AttnAggregator,
-    DepthchargeEncoder,
+from metabo_depthcharge.encoders.molecules import MolEmbedder, MultiMolEmbedder
+from metabo_depthcharge.encoders.nn import AttnAggregator, ResidualProjection
+from metabo_depthcharge.encoders.spectra import (
     MetadataEncoder,
     PeakEncoder,
-    ResidualProjection,
+    SpectrumEmbedder,
     SubformulaEncoder,
 )
 
 
 __all__ = [
     "AttnAggregator",
-    "DepthchargeEncoder",
+    "SpectrumEmbedder",
     "MetadataEncoder",
+    "MolEmbedder",
+    "MultiMolEmbedder",
     "PeakEncoder",
     "ResidualProjection",
     "SubformulaEncoder",
