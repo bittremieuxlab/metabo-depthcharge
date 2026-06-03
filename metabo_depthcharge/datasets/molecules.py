@@ -238,11 +238,11 @@ class MoleculeDataset(torch.utils.data.Dataset):
                     for s in batch["smiles"]:
                         try:
                             m = Molecule(s)
-                            for p in needed:
-                                out[p].append(getattr(m, p))
+                            vals = {p: getattr(m, p) for p in needed}
                         except Exception:
-                            for p in needed:
-                                out[p].append(None)
+                            vals = {p: None for p in needed}
+                        for p in needed:
+                            out[p].append(vals[p])
                     return out
 
                 ds = ds.map(
