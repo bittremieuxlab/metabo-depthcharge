@@ -3,6 +3,7 @@ import time
 from multiprocessing import Pool, cpu_count
 
 import numpy as np
+from tqdm.auto import tqdm
 
 
 class BinaryTanimoto:
@@ -148,6 +149,8 @@ class MCESDistance:
         Timeout in seconds for each pairwise MCES computation.
         If a computation exceeds this time, NaN is returned.
         None means no timeout (default: None).
+    progress : bool
+        Show a tqdm progress bar over pairs (default: False).
     """
 
     def __init__(
@@ -158,6 +161,7 @@ class MCESDistance:
         solver_options: dict = None,
         solver: str = "HiGHS",
         timeout: float | None = None,
+        progress: bool = False,
     ) -> None:
         if solver_options is None:
             solver_options = {"msg": 0}
@@ -167,6 +171,7 @@ class MCESDistance:
         self.solver_options = solver_options
         self.solver = solver
         self.timeout = timeout
+        self.progress = progress
 
     def _make_worker_args(self, smi1, smi2):
         return (
@@ -185,14 +190,24 @@ class MCESDistance:
         if len(worker_args) == 0:
             return []
 
+        bar = tqdm(total=len(worker_args), disable=not self.progress, unit="pair")
+
         if self.timeout is None:
             if len(worker_args) == 1:
                 try:
-                    return [_mces_worker(worker_args[0])]
+                    result = [_mces_worker(worker_args[0])]
                 except Exception:
-                    return [np.nan]
+                    result = [np.nan]
+                bar.update(1)
+                bar.close()
+                return result
             with Pool(self.n_jobs) as pool:
-                return pool.map(_mces_worker, worker_args)
+                results = []
+                for r in pool.imap(_mces_worker, worker_args):
+                    results.append(r)
+                    bar.update(1)
+            bar.close()
+            return results
 
         # Timeout path: use Process + kill() for reliable enforcement.
         # Process pairs in chunks of n_jobs for parallelism.
@@ -226,7 +241,9 @@ class MCESDistance:
                         results.append(q.get_nowait())
                     except Exception:
                         results.append(np.nan)
+                bar.update(1)
 
+        bar.close()
         return results
 
     def __call__(
