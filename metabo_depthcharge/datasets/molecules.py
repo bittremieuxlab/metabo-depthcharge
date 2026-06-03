@@ -229,6 +229,9 @@ class MoleculeDataset(torch.utils.data.Dataset):
                 if p not in ds.column_names or recompute_properties
             ]
             if needed:
+                cols_to_drop = [p for p in needed if p in ds.column_names]
+                if cols_to_drop:
+                    ds = ds.remove_columns(cols_to_drop)
 
                 def _props(batch):
                     out = {p: [] for p in needed}
