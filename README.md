@@ -1,19 +1,22 @@
 # metabo-depthcharge
 
-Shared metabolomics library for depthcharge-based MS/MS retrieval models.
+Library for depthcharge-based metabolomics models.
 
-## Modules
+## Installation
 
-Layout inspired by [depthcharge](https://github.com/wfondrie/depthcharge) — organized by *role*, not by data type. Role folders are named `spec/` and `chem/` (rather than `spectra/`, `molecules/`) so they don't collide path-wise with the `datasets/spectra.py` / `datasets/molecules.py` wrappers. All ML deps (torch, lightning, depthcharge-ms, transformers) are required runtime dependencies; only `dev` is an optional extra.
+Not yet on PyPI — install from GitHub.
 
-| Path | Contents |
-|---|---|
-| `spec/` | Spectrum object, preprocessing primitives, parsers |
-| `chem/` | `Molecule` wrapper, SMILES standardization, molecule-to-vector representations (fingerprints + neural embeddings), similarity metrics (Tanimoto, cosine, MCES) |
-| `tokenizers/` | m/z bucketing, SMILES, subformula tokenizers |
-| `datasets/` | HF Datasets-backed loaders for spectra and molecules |
-| `encoders/` | Neural encoders (spectrum, molecule, metadata, subformula) |
-| `nn/` | Shared model machinery: primitives, losses, retrievers |
+```bash
+# pip
+pip install git+https://github.com/bittremieuxlab/metabo-depthcharge.git
+
+# conda (env only; package itself via pip)
+conda create -n mdc python=3.11 && conda activate mdc
+pip install git+https://github.com/bittremieuxlab/metabo-depthcharge.git
+```
+
+See the [documentation](https://metabo-depthcharge.readthedocs.io/) for the
+full user guide.
 
 ## Development setup
 
