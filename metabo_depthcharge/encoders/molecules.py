@@ -6,14 +6,36 @@ import torch.nn as nn
 from metabo_depthcharge.encoders.nn import AttnAggregator
 
 
-class MolEmbedder(nn.Module):
+class MolMLP(nn.Module):
     """Molecule embedder for a single fingerprint type.
 
     Projects a fingerprint vector to ``d_model`` via a linear layer followed
     by ``n_layers - 1`` residual blocks (LayerNorm → Linear → GELU). A
     normalisation step is applied at forward time depending on ``fp_type``:
-    count FPs are normalised via ``max_counts``; dense FPs are L2-normalised;
+    count FPs are normalised via dividing by ``max_counts`` vectors; dense FPs are L2-normalised;
     binary FPs are passed through unchanged.
+
+    Given input :math:`x \\in \\mathbb{R}^{d_\\text{fp}}`, first apply
+    type-specific normalisation:
+
+    .. math::
+
+        \\tilde{x} = \\text{norm}(x)
+
+    Where :math:`\\text{norm}(\\cdot)` depends on ``fp_type`` as described above.
+    then project and apply :math:`L - 1` residual blocks:
+
+    .. math::
+
+        h_0 = W_0\\,\\tilde{x} + b_0
+
+    .. math::
+
+        h_\\ell = h_{\\ell-1} + \\text{GELU}\\!\\left(
+            W_\\ell\\,\\text{LN}(h_{\\ell-1}) + b_\\ell
+        \\right), \\quad \\ell = 1,\\ldots,L-1
+
+    where :math:`L` is ``n_layers``.
 
     Parameters
     ----------
@@ -32,7 +54,7 @@ class MolEmbedder(nn.Module):
         ``(fp_size,)`` tensor of per-bit max counts used for count
         normalisation when ``fp_type="count"``. Registered as a buffer
         (not a learnable parameter). Obtain via
-        :meth:`~metabo_depthcharge.datasets.molecules.MoleculeDataset.construct_mol_embedder`
+        :meth:`~metabo_depthcharge.datasets.molecules.MoleculeDataset.get_molmlp`
         to avoid manual derivation.
     """
 
@@ -101,10 +123,10 @@ class MolEmbedder(nn.Module):
         return z
 
 
-class MultiMolEmbedder(nn.Module):
+class MultiMolMLP(nn.Module):
     """Embeds multiple fingerprint types and aggregates via attention pooling.
 
-    Each fingerprint type gets its own :class:`MolEmbedder` projecting to
+    Each fingerprint type gets its own :class:`MolMLP` projecting to
     ``d_model``. The per-type embeddings are stacked into
     ``(B, ..., N_fp, d_model)`` and aggregated with :class:`AttnAggregator`
     to produce ``(B, ..., d_model)``.
@@ -116,7 +138,7 @@ class MultiMolEmbedder(nn.Module):
     fp_sizes : list[int]
         Input dimensionality for each fingerprint type.
     n_layers : int
-        Number of layers passed to every :class:`MolEmbedder`.
+        Number of layers passed to every :class:`MolMLP`.
     d_model : int, default 512
         Shared output embedding dimension.
     fp_types : list[str], optional
@@ -145,7 +167,7 @@ class MultiMolEmbedder(nn.Module):
 
         self.embedders = nn.ModuleDict(
             {
-                name: MolEmbedder(
+                name: MolMLP(
                     fp_size=size,
                     n_layers=n_layers,
                     d_model=d_model,

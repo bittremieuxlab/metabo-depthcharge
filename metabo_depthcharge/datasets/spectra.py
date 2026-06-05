@@ -86,8 +86,8 @@ def _parse_precursor_mz(v) -> float:
 class SpectrumDataset(torch.utils.data.Dataset):
     """Spectrum dataset backed by an Arrow table, via HF Datasets.
 
-    Build once from a source file, persist to disk, reload for training.
-    Direct instantiation is not supported; use the class methods below.
+    Build once via :meth:`from_mgf` or :meth:`from_list`, persist to disk,
+    and reload with :meth:`from_disk`. Direct instantiation is not supported.
 
     Example
     -------

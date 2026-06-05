@@ -8,8 +8,8 @@ torch = pytest.importorskip("torch")
 from metabo_depthcharge.encoders import (  # noqa: E402
     AttnAggregator,
     MetadataEncoder,
-    MolEmbedder,
-    MultiMolEmbedder,
+    MolMLP,
+    MultiMolMLP,
     PeakEncoder,
     ResidualProjection,
     SpectrumEmbedder,
@@ -142,33 +142,31 @@ def test_residual_projection_with_layers():
 
 
 # ---------------------------------------------------------------------------
-# MolEmbedder
+# MolMLP
 # ---------------------------------------------------------------------------
 
 
 def test_mol_embedder_binary():
-    emb = MolEmbedder(fp_size=64, n_layers=2, d_model=32, fp_type="binary")
+    emb = MolMLP(fp_size=64, n_layers=2, d_model=32, fp_type="binary")
     x = torch.randint(0, 2, (4, 64)).float()
     assert emb(x).shape == (4, 32)
 
 
 def test_mol_embedder_count():
     max_c = torch.rand(64) * 5 + 1
-    emb = MolEmbedder(
-        fp_size=64, n_layers=2, d_model=32, fp_type="count", max_counts=max_c
-    )
+    emb = MolMLP(fp_size=64, n_layers=2, d_model=32, fp_type="count", max_counts=max_c)
     x = torch.randint(0, 5, (4, 64)).float()
     assert emb(x).shape == (4, 32)
 
 
 def test_mol_embedder_dense():
-    emb = MolEmbedder(fp_size=64, n_layers=2, d_model=32, fp_type="dense")
+    emb = MolMLP(fp_size=64, n_layers=2, d_model=32, fp_type="dense")
     x = torch.randn(4, 64)
     assert emb(x).shape == (4, 32)
 
 
 def test_mol_embedder_zero_layers_identity():
-    emb = MolEmbedder(fp_size=32, n_layers=0, d_model=32, fp_type="binary")
+    emb = MolMLP(fp_size=32, n_layers=0, d_model=32, fp_type="binary")
     x = torch.rand(4, 32)
     out = emb(x)
     assert out.shape == (4, 32)
@@ -176,18 +174,18 @@ def test_mol_embedder_zero_layers_identity():
 
 
 def test_mol_embedder_one_layer():
-    emb = MolEmbedder(fp_size=64, n_layers=1, d_model=32, fp_type="binary")
+    emb = MolMLP(fp_size=64, n_layers=1, d_model=32, fp_type="binary")
     x = torch.rand(4, 64)
     assert emb(x).shape == (4, 32)
 
 
 # ---------------------------------------------------------------------------
-# MultiMolEmbedder
+# MultiMolMLP
 # ---------------------------------------------------------------------------
 
 
 def test_multi_mol_embedder_output_shape():
-    emb = MultiMolEmbedder(
+    emb = MultiMolMLP(
         fp_names=["fp1", "fp2"],
         fp_sizes=[64, 32],
         n_layers=2,
@@ -199,7 +197,7 @@ def test_multi_mol_embedder_output_shape():
 
 def test_multi_mol_embedder_mixed_types():
     max_c = torch.rand(64) * 5 + 1
-    emb = MultiMolEmbedder(
+    emb = MultiMolMLP(
         fp_names=["bin", "cnt", "dns"],
         fp_sizes=[64, 64, 32],
         n_layers=2,

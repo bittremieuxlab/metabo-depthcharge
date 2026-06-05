@@ -22,7 +22,7 @@ from metabo_depthcharge.chem.representations import (
     MoleculeToRdkit,
 )
 from metabo_depthcharge.datasets._common import hf_silent, hf_tempcache
-from metabo_depthcharge.encoders.molecules import MolEmbedder, MultiMolEmbedder
+from metabo_depthcharge.encoders.molecules import MolMLP, MultiMolMLP
 
 
 _FP_INFO: dict[str, dict] = {
@@ -87,8 +87,8 @@ _FP_INFO: dict[str, dict] = {
 class MoleculeDataset(torch.utils.data.Dataset):
     """Molecule dataset backed by an Arrow table, via HF Datasets.
 
-    Build once from a source file, persist to disk, reload for training.
-    Direct instantiation is not supported; use the class methods below.
+    Build once via :meth:`from_csv` or :meth:`from_list`, persist to disk,
+    and reload with :meth:`from_disk`. Direct instantiation is not supported.
 
     Example
     -------
@@ -651,7 +651,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
             out[k] = [r[k] for r in batch]
         return out
 
-    def construct_mol_embedder(
+    def get_molmlp(
         self,
         fp_names: list[str],
         n_layers: int,
@@ -659,29 +659,29 @@ class MoleculeDataset(torch.utils.data.Dataset):
         *,
         compute_max_counts: bool = True,
     ):
-        """Build a :class:`~metabo_depthcharge.encoders.molecules.MolEmbedder`
-        or :class:`~metabo_depthcharge.encoders.molecules.MultiMolEmbedder`
+        """Build a :class:`~metabo_depthcharge.encoders.molecules.MolMLP`
+        or :class:`~metabo_depthcharge.encoders.molecules.MultiMolMLP`
         wired to the fingerprint columns present in this dataset.
 
         Parameters
         ----------
         fp_names : list[str]
             One or more fingerprint column names (keys of :data:`_FP_INFO`).
-            A single-element list returns :class:`~metabo_depthcharge.encoders.molecules.MolEmbedder`;
-            two or more return :class:`~metabo_depthcharge.encoders.molecules.MultiMolEmbedder`.
+            A single-element list returns :class:`~metabo_depthcharge.encoders.molecules.MolMLP`;
+            two or more return :class:`~metabo_depthcharge.encoders.molecules.MultiMolMLP`.
         n_layers : int
             Depth passed to the underlying
-            :class:`~metabo_depthcharge.encoders.molecules.MolEmbedder`.
+            :class:`~metabo_depthcharge.encoders.molecules.MolMLP`.
         d_model : int, default 512
             Output embedding dimension.
         compute_max_counts : bool, default True
             If ``True``, scan count-fingerprint columns to derive per-bit
             ``max_counts`` tensors used for normalisation inside
-            :class:`~metabo_depthcharge.encoders.molecules.MolEmbedder`.
+            :class:`~metabo_depthcharge.encoders.molecules.MolMLP`.
 
         Returns
         -------
-        MolEmbedder or MultiMolEmbedder
+        MolMLP or MultiMolMLP
         """
         for name in fp_names:
             if name not in _FP_INFO:
@@ -704,7 +704,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
                     max_counts[name] = self._max_counts_from_sparse(self.ds, name, size)
 
         if len(fp_names) == 1:
-            return MolEmbedder(
+            return MolMLP(
                 fp_size=fp_sizes[0],
                 n_layers=n_layers,
                 d_model=d_model,
@@ -712,7 +712,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
                 max_counts=max_counts.get(fp_names[0]),
             )
 
-        return MultiMolEmbedder(
+        return MultiMolMLP(
             fp_names=fp_names,
             fp_sizes=fp_sizes,
             n_layers=n_layers,
@@ -725,7 +725,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
     def _max_counts_from_sparse(ds: Dataset, name: str, fp_size: int) -> torch.Tensor:
         """Compute per-bit max count across all rows of a sparse count column.
 
-        Used in get_mol_embedder() to normalise count fingerprints for MolEmbedder.
+        Used in get_mol_embedder() to normalise count fingerprints for MolMLP.
         """
         flat_idx = (
             ds.data.column(name)
