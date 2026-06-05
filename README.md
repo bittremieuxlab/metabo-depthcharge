@@ -1,5 +1,7 @@
 # metabo-depthcharge
 
+[![Documentation Status](https://readthedocs.org/projects/metabo-depthcharge/badge/?version=latest)](https://metabo-depthcharge.readthedocs.io/en/latest/?badge=latest)
+
 Library for depthcharge-based metabolomics models.
 
 ## Installation
