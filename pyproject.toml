@@ -16,24 +16,28 @@ dependencies = [
     "rdkit>=2023.9.0",
     "myopic_mces>=1.0.0,<2.0.0",
     "h5py>=3.10.0",
+    "datasets>=2.14.0",
+    "pyteomics>=4.6",
     "biosynfoni>=1.0.0",
     "map4>=1.1.0",
-]
-
-[project.optional-dependencies]
-nn = [
     "torch>=2.0.0",
     "lightning>=2.0.0",
     "depthcharge-ms>=0.4.9",
     "transformers>=4.30.0",
-    "unimol_tools>=0.1.0",
 ]
 
+[project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.4.0",
     "pre-commit>=3.0.0",
+    "sphinx>=7.0",
+    "pydata-sphinx-theme>=0.15",
+    "myst-parser>=2.0",
+    "sphinx-autodoc-typehints>=1.25",
+    "sphinx-copybutton>=0.5",
+    "sphinx-design>=0.5",
 ]
 
 [tool.setuptools.packages.find]
@@ -42,7 +46,7 @@ include = ["metabo_depthcharge*"]
 [tool.ruff]
 target-version = "py310"
 line-length = 88
-exclude = [".git", "__pycache__", "build", "dist", "*.egg-info"]
+exclude = [".git", "__pycache__", "build", "dist", "*.egg-info", "metabo_depthcharge/mist_cf"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM"]

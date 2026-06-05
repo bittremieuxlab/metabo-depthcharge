@@ -1,19 +1,22 @@
 # metabo-depthcharge
 
-Shared metabolomics library for depthcharge-based MS/MS retrieval models.
+Library for depthcharge-based metabolomics models.
 
-## Modules
+## Installation
 
-Layout follows [depthcharge](https://github.com/wfondrie/depthcharge) — organized by *role*, not by data type. Heavy ML deps are gated behind the optional `nn` extra.
+Not yet on PyPI — install from GitHub.
 
-| Path | Contents | Deps |
-|---|---|---|
-| `spectra/` | Spectrum object, preprocessing primitives, (later) HF dataset loaders | base |
-| `molecules/` | SMILES utilities, fingerprint extractors, similarity metrics (Tanimoto, cosine, MCES) | base |
-| `tokenizers/` | m/z bucketing, SMILES, subformula tokenizers | base |
-| `data/` | HF Datasets-backed loaders for spectra and molecules | base |
-| `encoders/` | Neural encoders (spectrum, molecule, metadata, subformula) | `nn` |
-| `nn/` | Shared model machinery: primitives, losses, retrievers | `nn` |
+```bash
+# pip
+pip install git+https://github.com/bittremieuxlab/metabo-depthcharge.git
+
+# conda (env only; package itself via pip)
+conda create -n mdc python=3.11 && conda activate mdc
+pip install git+https://github.com/bittremieuxlab/metabo-depthcharge.git
+```
+
+See the [documentation](https://metabo-depthcharge.readthedocs.io/) for the
+full user guide.
 
 ## Development setup
 

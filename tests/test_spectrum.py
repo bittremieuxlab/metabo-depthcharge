@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
+import torch
 
-from metabo_depthcharge.spectra import (
+from metabo_depthcharge.datasets.spectra import SpectrumDataset
+from metabo_depthcharge.spec import (
     DefaultSpectrumProcessor,
     Normalizer,
     PeakFilter,
@@ -88,10 +90,180 @@ def test_default_spectrum_processor():
 
 
 def test_torch():
-    pytest.importorskip("torch")
-    import torch
-
     t = make_spectrum().torch()
     assert set(t.keys()) == {"mz", "intensity"}
     assert t["mz"].shape[-1] == 8
     assert t["intensity"].dtype == torch.float32
+
+
+# --- SpectrumDataset ----------------------------------------------------
+
+
+SPECTRA_LIST = [
+    np.array([MZ.copy(), INTENSITY.copy()]),
+    np.array([[100.0, 200.0], [1.0, 2.0]]),
+    np.array([[300.0], [5.0]]),
+]
+PRECURSOR_MZ_LIST = [150.0, 250.0, 350.0]
+
+
+def _make_mgf(path):
+    """Write a minimal 2-spectrum MGF file."""
+    path.write_text(
+        "BEGIN IONS\n"
+        "TITLE=spec_one\n"
+        "PEPMASS=200.0\n"
+        "50.0 5.0\n"
+        "100.0 10.0\n"
+        "END IONS\n"
+        "BEGIN IONS\n"
+        "TITLE=spec_two\n"
+        "PEPMASS=300.0\n"
+        "75.0 3.0\n"
+        "150.0 8.0\n"
+        "250.0 4.0\n"
+        "END IONS\n"
+    )
+
+
+@pytest.fixture
+def tiny_mgf(tmp_path):
+    path = tmp_path / "tiny.mgf"
+    _make_mgf(path)
+    return path
+
+
+@pytest.fixture
+def tiny_mgf_with_metadata(tmp_path):
+    path = tmp_path / "tiny_meta.mgf"
+    path.write_text(
+        "BEGIN IONS\n"
+        "PEPMASS=200.0\n"
+        "ADDUCT=[M+H]+\n"
+        "COLLISION_ENERGY=20\n"
+        "INSTRUMENT_TYPE=Orbitrap\n"
+        "50.0 5.0\n100.0 10.0\n150.0 3.0\n"
+        "END IONS\n"
+        "BEGIN IONS\n"
+        "PEPMASS=300.0\n"
+        "ADDUCT=[M-H]-\n"
+        "COLLISION_ENERGY=10 20 30\n"
+        "INSTRUMENT_TYPE=qtof\n"
+        "75.0 3.0\n150.0 8.0\n"
+        "END IONS\n"
+        "BEGIN IONS\n"
+        "PEPMASS=400.0\n"
+        "80.0 1.0\n"
+        "END IONS\n"
+    )
+    return path
+
+
+def test_from_list_basic():
+    ds = SpectrumDataset.from_list(SPECTRA_LIST, precursor_mz=PRECURSOR_MZ_LIST)
+    assert len(ds) == 3
+    row = ds[0]
+    assert "mz" in row and "intensity" in row
+    np.testing.assert_array_almost_equal(row["mz"].numpy(), MZ)
+    assert float(ds[0]["precursor_mz"]) == pytest.approx(150.0)
+
+
+def test_from_list_with_processor():
+    ds = SpectrumDataset.from_list(SPECTRA_LIST, processor=Normalizer())
+    # Normalized → max intensity is 1.0 per row.
+    assert np.isclose(float(ds[0]["intensity"].max()), 1.0)
+
+
+def test_from_list_default_precursor_mz_is_zero():
+    ds = SpectrumDataset.from_list(SPECTRA_LIST)
+    assert float(ds[0]["precursor_mz"]) == 0.0
+
+
+def test_from_list_precursor_mz_length_mismatch_raises():
+    with pytest.raises(ValueError, match="precursor_mz"):
+        SpectrumDataset.from_list(SPECTRA_LIST, precursor_mz=[1.0, 2.0])
+
+
+def test_from_mgf_basic(tiny_mgf):
+    ds = SpectrumDataset.from_mgf(tiny_mgf)
+    assert len(ds) == 2
+    row = ds[0]
+    assert "mz" in row and "intensity" in row
+    np.testing.assert_array_equal(row["mz"].numpy(), [50.0, 100.0])
+
+
+def test_spectrum_dataset_from_disk_round_trip(tiny_mgf, tmp_path):
+    saved = tmp_path / "saved_spec"
+    ds = SpectrumDataset.from_mgf(tiny_mgf, save_to=saved)
+    reloaded = SpectrumDataset.from_disk(saved)
+    assert len(reloaded) == len(ds)
+    assert reloaded.ds.column_names == ds.ds.column_names
+    np.testing.assert_array_equal(reloaded[0]["mz"].numpy(), ds[0]["mz"].numpy())
+
+
+def test_spectrum_dataset_filter(tiny_mgf):
+    ds = SpectrumDataset.from_mgf(tiny_mgf)
+    only_one = ds.filter(lambda r: len(r["mz"]) == 2)
+    assert isinstance(only_one, SpectrumDataset)
+    assert len(only_one) == 1
+
+
+def test_metadata_fields_encoded_and_batched(tiny_mgf_with_metadata):
+    ds = SpectrumDataset.from_mgf(
+        tiny_mgf_with_metadata,
+        metadata=["adduct", "collision_energy", "instrument_type"],
+        columns={},
+    )
+    # Canonical scalar dtypes.
+    assert ds.ds.features["adduct"].dtype == "int64"
+    assert ds.ds.features["collision_energy"].dtype == "float32"
+    assert ds.ds.features["instrument_type"].dtype == "int64"
+
+    # Values: known adducts/instruments → nonzero; missing row → 0.
+    assert int(ds[0]["adduct"]) == 1  # [M+H]+ → index 1
+    assert int(ds[1]["adduct"]) == 6  # [M-H]- → index 6
+    assert int(ds[2]["adduct"]) == 0
+    # CE divided by 100; stepped CE is mean/100 = 20/100 = 0.2.
+    assert float(ds[0]["collision_energy"]) == pytest.approx(0.2)
+    assert float(ds[1]["collision_energy"]) == pytest.approx(0.2)
+    assert float(ds[2]["collision_energy"]) == 0.0
+    assert int(ds[0]["instrument_type"]) == 1  # orbitrap → 1
+    assert int(ds[1]["instrument_type"]) == 2  # qtof → 2
+    assert int(ds[2]["instrument_type"]) == 0
+
+    # Collate nests metadata into a sub-dict of stacked tensors.
+    batch = ds.collate([ds[0], ds[1], ds[2]])
+    assert "metadata" in batch
+    md = batch["metadata"]
+    assert set(md) == {"adduct", "collision_energy", "instrument_type"}
+    assert md["adduct"].shape == (3,)
+    assert md["adduct"].dtype == torch.int64
+    assert md["collision_energy"].dtype == torch.float32
+    assert md["instrument_type"].dtype == torch.int64
+    assert md["adduct"].tolist() == [1, 6, 0]
+
+
+def test_metadata_feeds_metadata_encoder(tiny_mgf_with_metadata):
+    from metabo_depthcharge.encoders.spectra import MetadataEncoder
+
+    ds = SpectrumDataset.from_mgf(
+        tiny_mgf_with_metadata,
+        metadata=["adduct", "collision_energy"],
+        columns={},
+    )
+    batch = ds.collate([ds[0], ds[1]])
+    enc = MetadataEncoder(d_model=16, metadata_fields=["adduct", "collision_energy"])
+    out = enc(batch["metadata"])
+    assert out.shape == (2, 16)
+
+
+def test_spectrum_dataset_collate_pads_ragged(tiny_mgf):
+    ds = SpectrumDataset.from_mgf(tiny_mgf)
+    batch = ds.collate([ds[0], ds[1]])
+    # Two rows: first has 2 peaks, second has 3 → padded to L=3.
+    assert batch["mz"].shape == (2, 3)
+    assert batch["intensity"].shape == (2, 3)
+    assert batch["mask"].shape == (2, 3)
+    # Mask should mark trailing pad as False on the shorter row.
+    assert batch["mask"][0].tolist() == [True, True, False]
+    assert batch["mask"][1].tolist() == [True, True, True]

@@ -20,3 +20,5 @@ htmlcov/
 lightning_logs/
 uv.lock
 outputs/
+docs/_build/
+docs/api/generated/

@@ -7,10 +7,12 @@ torch = pytest.importorskip("torch")
 
 from metabo_depthcharge.encoders import (  # noqa: E402
     AttnAggregator,
-    DepthchargeEncoder,
     MetadataEncoder,
+    MolMLP,
+    MultiMolMLP,
     PeakEncoder,
     ResidualProjection,
+    SpectrumEmbedder,
 )
 
 
@@ -140,7 +142,79 @@ def test_residual_projection_with_layers():
 
 
 # ---------------------------------------------------------------------------
-# DepthchargeEncoder
+# MolMLP
+# ---------------------------------------------------------------------------
+
+
+def test_mol_embedder_binary():
+    emb = MolMLP(fp_size=64, n_layers=2, d_model=32, fp_type="binary")
+    x = torch.randint(0, 2, (4, 64)).float()
+    assert emb(x).shape == (4, 32)
+
+
+def test_mol_embedder_count():
+    max_c = torch.rand(64) * 5 + 1
+    emb = MolMLP(fp_size=64, n_layers=2, d_model=32, fp_type="count", max_counts=max_c)
+    x = torch.randint(0, 5, (4, 64)).float()
+    assert emb(x).shape == (4, 32)
+
+
+def test_mol_embedder_dense():
+    emb = MolMLP(fp_size=64, n_layers=2, d_model=32, fp_type="dense")
+    x = torch.randn(4, 64)
+    assert emb(x).shape == (4, 32)
+
+
+def test_mol_embedder_zero_layers_identity():
+    emb = MolMLP(fp_size=32, n_layers=0, d_model=32, fp_type="binary")
+    x = torch.rand(4, 32)
+    out = emb(x)
+    assert out.shape == (4, 32)
+    assert torch.allclose(out, x)
+
+
+def test_mol_embedder_one_layer():
+    emb = MolMLP(fp_size=64, n_layers=1, d_model=32, fp_type="binary")
+    x = torch.rand(4, 64)
+    assert emb(x).shape == (4, 32)
+
+
+# ---------------------------------------------------------------------------
+# MultiMolMLP
+# ---------------------------------------------------------------------------
+
+
+def test_multi_mol_embedder_output_shape():
+    emb = MultiMolMLP(
+        fp_names=["fp1", "fp2"],
+        fp_sizes=[64, 32],
+        n_layers=2,
+        d_model=32,
+    )
+    fps = {"fp1": torch.rand(4, 64), "fp2": torch.rand(4, 32)}
+    assert emb(fps).shape == (4, 32)
+
+
+def test_multi_mol_embedder_mixed_types():
+    max_c = torch.rand(64) * 5 + 1
+    emb = MultiMolMLP(
+        fp_names=["bin", "cnt", "dns"],
+        fp_sizes=[64, 64, 32],
+        n_layers=2,
+        d_model=32,
+        fp_types=["binary", "count", "dense"],
+        max_counts={"cnt": max_c},
+    )
+    fps = {
+        "bin": torch.randint(0, 2, (3, 64)).float(),
+        "cnt": torch.randint(0, 5, (3, 64)).float(),
+        "dns": torch.randn(3, 32),
+    }
+    assert emb(fps).shape == (3, 32)
+
+
+# ---------------------------------------------------------------------------
+# SpectrumEmbedder
 # ---------------------------------------------------------------------------
 
 depthcharge = pytest.importorskip("depthcharge")
@@ -158,16 +232,16 @@ def _make_batch():
     return mz, intensity, precursor_mz
 
 
-def test_depthcharge_encoder_forward_shape():
-    enc = DepthchargeEncoder(d_model=D_MODEL, n_layers=N_LAYERS, d_out=D_OUT)
+def test_spectrum_embedder_forward_shape():
+    enc = SpectrumEmbedder(d_model=D_MODEL, n_layers=N_LAYERS, d_out=D_OUT)
     enc.eval()
     with torch.no_grad():
         out = enc(*_make_batch())
     assert out.shape == (B, D_OUT)
 
 
-def test_depthcharge_encoder_attention_pool():
-    enc = DepthchargeEncoder(
+def test_spectrum_embedder_attention_pool():
+    enc = SpectrumEmbedder(
         d_model=D_MODEL, n_layers=N_LAYERS, d_out=D_OUT, pool="attention"
     )
     enc.eval()
@@ -176,19 +250,17 @@ def test_depthcharge_encoder_attention_pool():
     assert out.shape == (B, D_OUT)
 
 
-def test_depthcharge_encoder_cls_pool():
-    enc = DepthchargeEncoder(
-        d_model=D_MODEL, n_layers=N_LAYERS, d_out=D_OUT, pool="cls"
-    )
+def test_spectrum_embedder_cls_pool():
+    enc = SpectrumEmbedder(d_model=D_MODEL, n_layers=N_LAYERS, d_out=D_OUT, pool="cls")
     enc.eval()
     with torch.no_grad():
         out = enc(*_make_batch())
     assert out.shape == (B, D_OUT)
 
 
-def test_depthcharge_encoder_with_metadata():
+def test_spectrum_embedder_with_metadata():
     meta_enc = MetadataEncoder(d_model=D_MODEL, metadata_fields=["adduct"])
-    enc = DepthchargeEncoder(
+    enc = SpectrumEmbedder(
         d_model=D_MODEL,
         n_layers=N_LAYERS,
         d_out=D_OUT,
