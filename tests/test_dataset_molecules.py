@@ -44,24 +44,24 @@ def test_unknown_property_raises(tiny_tsv):
         MoleculeDataset.from_csv(tiny_tsv, sep="\t", properties=["bogus"])
 
 
-# --- from_smiles --------------------------------------------------------
+# --- from_list --------------------------------------------------------
 
 
-def test_from_smiles_accepts_strings():
-    ds = MoleculeDataset.from_smiles([ASPIRIN, CAFFEINE, BENZENE])
+def test_from_list_accepts_strings():
+    ds = MoleculeDataset.from_list([ASPIRIN, CAFFEINE, BENZENE])
     assert len(ds) == 3
     assert ds[0]["smiles"] == ASPIRIN
 
 
-def test_from_smiles_accepts_mixed_str_and_molecule():
-    ds = MoleculeDataset.from_smiles([ASPIRIN, Molecule(CAFFEINE), BENZENE])
+def test_from_list_accepts_mixed_str_and_molecule():
+    ds = MoleculeDataset.from_list([ASPIRIN, Molecule(CAFFEINE), BENZENE])
     assert len(ds) == 3
     # Molecule objects contribute their .smiles attribute.
     assert ds[1]["smiles"] == CAFFEINE
 
 
-def test_from_smiles_forwards_pipeline_kwargs():
-    ds = MoleculeDataset.from_smiles(
+def test_from_list_forwards_pipeline_kwargs():
+    ds = MoleculeDataset.from_list(
         [ASPIRIN, CAFFEINE],
         properties=["formula"],
     )
@@ -72,10 +72,7 @@ def test_from_smiles_forwards_pipeline_kwargs():
 
 
 def test_standardize_strips_salt():
-    ds = MoleculeDataset.from_smiles(
-        ["CC(=O)O.[Na]", CAFFEINE],
-        standardize=True,
-    )
+    ds = MoleculeDataset.from_list(["CC(=O)O.[Na]", CAFFEINE]).standardize()
     assert "[Na]" not in ds[0]["smiles"]
     assert ds[0]["smiles"] == "CC(=O)[O-]"
 
@@ -84,11 +81,20 @@ def test_standardize_drops_failed_rows():
     # Hypervalent SMILES that needs sanitization fallback to even parse →
     # Cleanup re-fails sanitization → row is dropped.
     bad = "F[P](F)(F)(F)(F)(F)F"  # 7-coordinate P, fails strict sanitization
-    ds = MoleculeDataset.from_smiles([ASPIRIN, bad, CAFFEINE], standardize=True)
-    # Result should drop at least the broken row.
+    ds = MoleculeDataset.from_list([ASPIRIN, bad, CAFFEINE]).standardize()
     smiles_out = [ds[i]["smiles"] for i in range(len(ds))]
     assert bad not in smiles_out
     assert len(ds) < 3
+
+
+def test_standardize_recomputes_stale_property_columns():
+    # Load with a salt SMILES and pre-compute formula from the unsanitized form.
+    ds = MoleculeDataset.from_list(["CC(=O)O.[Na]", CAFFEINE], properties=["formula"])
+    formula_before = ds[0]["formula"]
+    # Standardize removes the salt → SMILES changes → formula must update too.
+    ds2 = ds.standardize()
+    assert "formula" in ds2.ds.column_names
+    assert ds2[0]["formula"] != formula_before
 
 
 # --- properties columns -------------------------------------------------
@@ -141,13 +147,15 @@ def test_recompute_properties_true_overwrites_csv_value(tiny_tsv_with_formula):
 
 
 def test_representations_adds_morgan(tiny_tsv):
-    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t", representations={"morgan": {}})
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
+        {"morgan": {}}
+    )
     assert "morgan" in ds.ds.column_names
 
 
 def test_representations_adds_count_with_values_column(tiny_tsv):
-    ds = MoleculeDataset.from_csv(
-        tiny_tsv, sep="\t", representations={"morgan_count": {}}
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
+        {"morgan_count": {}}
     )
     # Count fingerprints store sparse indices + a values column.
     assert "morgan_count" in ds.ds.column_names
@@ -155,20 +163,18 @@ def test_representations_adds_count_with_values_column(tiny_tsv):
 
 
 def test_representations_unknown_name_raises(tiny_tsv):
-    with pytest.raises(ValueError, match="Unknown fingerprint"):
-        MoleculeDataset.from_csv(tiny_tsv, sep="\t", representations={"made_up": {}})
+    with pytest.raises(ValueError, match="Unknown representation name"):
+        MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
+            {"made_up": {}}
+        )
 
 
-# --- build order: standardize → properties → representations ------------
-
-
-def test_properties_computed_on_post_standardize_smiles():
-    ds = MoleculeDataset.from_smiles(
-        ["CC(=O)O.[Na]", CAFFEINE],
-        standardize=True,
-        properties=["formula"],
+def test_representations_multiple_at_once(tiny_tsv):
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
+        {"morgan": {}, "maccs": {}}
     )
-    assert ds[0]["formula"] == "C2H3O2-"
+    assert "morgan" in ds.ds.column_names
+    assert "maccs" in ds.ds.column_names
 
 
 # --- from_disk round-trip -----------------------------------------------
@@ -213,10 +219,10 @@ def test_filter_returns_moleculedataset(tiny_tsv):
     assert aromatic_only[0]["smiles"] == BENZENE
 
 
-def test_add_fingerprint_appends_column(tiny_tsv):
+def test_add_representations_appends_columns(tiny_tsv):
     ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t")
     assert "morgan" not in ds.ds.column_names
-    ds2 = ds.add_fingerprint("morgan")
+    ds2 = ds.add_representations({"morgan": None})
     assert "morgan" in ds2.ds.column_names
     assert isinstance(ds2, MoleculeDataset)
 
@@ -225,15 +231,17 @@ def test_add_fingerprint_appends_column(tiny_tsv):
 
 
 def test_collate_binary_fingerprint_dense_shape(tiny_tsv):
-    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t", representations={"morgan": {}})
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
+        {"morgan": {}}
+    )
     batch = ds.collate([ds[0], ds[1]])
     assert batch["morgan"].shape == (2, 4096)
     assert batch["morgan"].dtype == torch.float32
 
 
 def test_collate_count_fingerprint_carries_values(tiny_tsv):
-    ds = MoleculeDataset.from_csv(
-        tiny_tsv, sep="\t", representations={"morgan_count": {}}
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
+        {"morgan_count": {}}
     )
     batch = ds.collate([ds[0], ds[1]])
     assert batch["morgan_count"].shape == (2, 4096)
@@ -247,8 +255,7 @@ def test_collate_passes_through_non_fp_columns(tiny_tsv):
         tiny_tsv,
         sep="\t",
         properties=["formula"],
-        representations={"morgan": {}},
-    )
+    ).add_representations({"morgan": {}})
     batch = ds.collate([ds[0], ds[1]])
     # smiles always a list of strings.
     assert batch["smiles"] == [ASPIRIN, CAFFEINE]
@@ -274,15 +281,17 @@ def test_fp_info_build_returns_extractor_with_matching_size(name):
 def test_construct_mol_embedder_single_binary_returns_mol_embedder(tiny_tsv):
     from metabo_depthcharge.encoders.molecules import MolEmbedder
 
-    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t", representations={"morgan": {}})
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
+        {"morgan": {}}
+    )
     enc = ds.construct_mol_embedder(["morgan"], n_layers=2, d_model=32)
     assert isinstance(enc, MolEmbedder)
     assert enc.fp_type == "binary"
 
 
 def test_construct_mol_embedder_single_count_has_max_counts(tiny_tsv):
-    ds = MoleculeDataset.from_csv(
-        tiny_tsv, sep="\t", representations={"morgan_count": {}}
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
+        {"morgan_count": {}}
     )
     enc = ds.construct_mol_embedder(["morgan_count"], n_layers=2, d_model=32)
     assert enc.max_counts is not None
@@ -290,8 +299,8 @@ def test_construct_mol_embedder_single_count_has_max_counts(tiny_tsv):
 
 
 def test_construct_mol_embedder_count_no_max_counts_when_disabled(tiny_tsv):
-    ds = MoleculeDataset.from_csv(
-        tiny_tsv, sep="\t", representations={"morgan_count": {}}
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
+        {"morgan_count": {}}
     )
     enc = ds.construct_mol_embedder(
         ["morgan_count"], n_layers=2, d_model=32, compute_max_counts=False
@@ -302,8 +311,8 @@ def test_construct_mol_embedder_count_no_max_counts_when_disabled(tiny_tsv):
 def test_construct_mol_embedder_multi_returns_multi_mol_embedder(tiny_tsv):
     from metabo_depthcharge.encoders.molecules import MultiMolEmbedder
 
-    ds = MoleculeDataset.from_csv(
-        tiny_tsv, sep="\t", representations={"morgan": {}, "maccs": {}}
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
+        {"morgan": {}, "maccs": {}}
     )
     enc = ds.construct_mol_embedder(["morgan", "maccs"], n_layers=2, d_model=32)
     assert isinstance(enc, MultiMolEmbedder)
@@ -311,7 +320,9 @@ def test_construct_mol_embedder_multi_returns_multi_mol_embedder(tiny_tsv):
 
 
 def test_construct_mol_embedder_forward_pass(tiny_tsv):
-    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t", representations={"morgan": {}})
+    ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
+        {"morgan": {}}
+    )
     enc = ds.construct_mol_embedder(["morgan"], n_layers=2, d_model=32)
     batch = ds.collate([ds[i] for i in range(len(ds))])
     out = enc(batch["morgan"])
@@ -326,5 +337,5 @@ def test_construct_mol_embedder_raises_on_missing_column(tiny_tsv):
 
 def test_construct_mol_embedder_raises_on_unknown_fp(tiny_tsv):
     ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t")
-    with pytest.raises(ValueError, match="Unknown fingerprint"):
+    with pytest.raises(ValueError, match="Unknown representation name"):
         ds.construct_mol_embedder(["not_a_fp"], n_layers=2, d_model=32)

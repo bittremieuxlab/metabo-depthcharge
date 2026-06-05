@@ -99,23 +99,12 @@ def test_torch():
 # --- SpectrumDataset ----------------------------------------------------
 
 
-def _spectra_factory():
-    """Yield three small spectra; reusable factory for from_spectra."""
-
-    def gen():
-        yield Spectrum(mz=MZ.copy(), intensity=INTENSITY.copy(), metadata={"id": "a"})
-        yield Spectrum(
-            mz=np.array([100.0, 200.0]),
-            intensity=np.array([1.0, 2.0]),
-            metadata={"id": "b"},
-        )
-        yield Spectrum(
-            mz=np.array([300.0]),
-            intensity=np.array([5.0]),
-            metadata={"id": "c"},
-        )
-
-    return gen
+SPECTRA_LIST = [
+    np.array([MZ.copy(), INTENSITY.copy()]),
+    np.array([[100.0, 200.0], [1.0, 2.0]]),
+    np.array([[300.0], [5.0]]),
+]
+PRECURSOR_MZ_LIST = [150.0, 250.0, 350.0]
 
 
 def _make_mgf(path):
@@ -144,29 +133,55 @@ def tiny_mgf(tmp_path):
     return path
 
 
-def test_from_spectra_basic():
-    from datasets import Value as HFValue
-
-    ds = SpectrumDataset.from_spectra(
-        _spectra_factory(),
-        columns={"id": HFValue("string")},
+@pytest.fixture
+def tiny_mgf_with_metadata(tmp_path):
+    path = tmp_path / "tiny_meta.mgf"
+    path.write_text(
+        "BEGIN IONS\n"
+        "PEPMASS=200.0\n"
+        "ADDUCT=[M+H]+\n"
+        "COLLISION_ENERGY=20\n"
+        "INSTRUMENT_TYPE=Orbitrap\n"
+        "50.0 5.0\n100.0 10.0\n150.0 3.0\n"
+        "END IONS\n"
+        "BEGIN IONS\n"
+        "PEPMASS=300.0\n"
+        "ADDUCT=[M-H]-\n"
+        "COLLISION_ENERGY=10 20 30\n"
+        "INSTRUMENT_TYPE=qtof\n"
+        "75.0 3.0\n150.0 8.0\n"
+        "END IONS\n"
+        "BEGIN IONS\n"
+        "PEPMASS=400.0\n"
+        "80.0 1.0\n"
+        "END IONS\n"
     )
+    return path
+
+
+def test_from_list_basic():
+    ds = SpectrumDataset.from_list(SPECTRA_LIST, precursor_mz=PRECURSOR_MZ_LIST)
     assert len(ds) == 3
     row = ds[0]
     assert "mz" in row and "intensity" in row
-    assert row["id"] == "a"
+    np.testing.assert_array_almost_equal(row["mz"].numpy(), MZ)
+    assert float(ds[0]["precursor_mz"]) == pytest.approx(150.0)
 
 
-def test_from_spectra_with_processor():
-    from datasets import Value as HFValue
-
-    ds = SpectrumDataset.from_spectra(
-        _spectra_factory(),
-        columns={"id": HFValue("string")},
-        processor=Normalizer(),
-    )
+def test_from_list_with_processor():
+    ds = SpectrumDataset.from_list(SPECTRA_LIST, processor=Normalizer())
     # Normalized → max intensity is 1.0 per row.
     assert np.isclose(float(ds[0]["intensity"].max()), 1.0)
+
+
+def test_from_list_default_precursor_mz_is_zero():
+    ds = SpectrumDataset.from_list(SPECTRA_LIST)
+    assert float(ds[0]["precursor_mz"]) == 0.0
+
+
+def test_from_list_precursor_mz_length_mismatch_raises():
+    with pytest.raises(ValueError, match="precursor_mz"):
+        SpectrumDataset.from_list(SPECTRA_LIST, precursor_mz=[1.0, 2.0])
 
 
 def test_from_mgf_basic(tiny_mgf):
@@ -193,35 +208,11 @@ def test_spectrum_dataset_filter(tiny_mgf):
     assert len(only_one) == 1
 
 
-def test_metadata_fields_encoded_and_batched():
-    def factory():
-        yield Spectrum(
-            mz=MZ.copy(),
-            intensity=INTENSITY.copy(),
-            metadata={
-                "adduct": "[M+H]+",
-                "collision_energy": "20",
-                "instrument_type": "Orbitrap",
-            },
-        )
-        yield Spectrum(
-            mz=np.array([100.0, 200.0]),
-            intensity=np.array([1.0, 2.0]),
-            metadata={
-                "adduct": "[M-H]-",
-                "collision_energy": "10 20 30",
-                "instrument_type": "qtof",
-            },
-        )
-        yield Spectrum(
-            mz=np.array([300.0]),
-            intensity=np.array([5.0]),
-            metadata={},  # all missing
-        )
-
-    ds = SpectrumDataset.from_spectra(
-        lambda: factory(),
+def test_metadata_fields_encoded_and_batched(tiny_mgf_with_metadata):
+    ds = SpectrumDataset.from_mgf(
+        tiny_mgf_with_metadata,
         metadata=["adduct", "collision_energy", "instrument_type"],
+        columns={},
     )
     # Canonical scalar dtypes.
     assert ds.ds.features["adduct"].dtype == "int64"
@@ -252,24 +243,13 @@ def test_metadata_fields_encoded_and_batched():
     assert md["adduct"].tolist() == [1, 6, 0]
 
 
-def test_metadata_feeds_metadata_encoder():
+def test_metadata_feeds_metadata_encoder(tiny_mgf_with_metadata):
     from metabo_depthcharge.encoders.spectra import MetadataEncoder
 
-    def factory():
-        yield Spectrum(
-            mz=MZ.copy(),
-            intensity=INTENSITY.copy(),
-            metadata={"adduct": "[M+H]+", "collision_energy": "20"},
-        )
-        yield Spectrum(
-            mz=np.array([100.0, 200.0]),
-            intensity=np.array([1.0, 2.0]),
-            metadata={"adduct": "[M-H]-", "collision_energy": "40"},
-        )
-
-    ds = SpectrumDataset.from_spectra(
-        lambda: factory(),
+    ds = SpectrumDataset.from_mgf(
+        tiny_mgf_with_metadata,
         metadata=["adduct", "collision_energy"],
+        columns={},
     )
     batch = ds.collate([ds[0], ds[1]])
     enc = MetadataEncoder(d_model=16, metadata_fields=["adduct", "collision_energy"])

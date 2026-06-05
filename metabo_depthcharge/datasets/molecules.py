@@ -85,24 +85,42 @@ _FP_INFO: dict[str, dict] = {
 
 
 class MoleculeDataset(torch.utils.data.Dataset):
-    """Molecule dataset backed by an Arrow table, materialized via HF Datasets.
+    """Molecule dataset backed by an Arrow table, via HF Datasets.
 
-    Build via :meth:`from_smiles`, :meth:`from_csv`, :meth:`from_disk`,
-    or wrap an existing HF :class:`Dataset` via ``__init__``.
+    Build once from a source file, persist to disk, reload for training.
+    Direct instantiation is not supported; use the class methods below.
 
-    Parameters
-    ----------
-    ds : datasets.Dataset
-        A pre-existing HF Dataset.
+    Example
+    -------
+    .. code-block:: python
 
-    Attributes
-    ----------
-    ds : datasets.Dataset
-        The torch-formatted HF Dataset.
+        # build and save (CSV must have a "smiles" column)
+        ds = MoleculeDataset.from_csv("molecules.csv", save_to="molecules/")
+
+        # load from previously-built
+        ds = MoleculeDataset.from_disk("molecules/")
+
+        # add fingerprint columns
+        ds = ds.add_representations({"morgan": None, "rdkit": None}, save_to="molecules/")
+
+        # Usage like torch Dataset:
+        len(ds)        # number of molecules
+        ds[0]          # dict with "smiles" and any property/fingerprint columns
+        ds[0]["smiles"]  # SMILES string
+
+        loader = torch.utils.data.DataLoader(
+            ds,
+            batch_size=32,
+            collate_fn=MoleculeDataset.collate
+        )
+
     """
 
-    def __init__(self, ds: Dataset):
-        self.ds = ds.with_format("torch")
+    def __init__(self, *args, **kwargs):
+        raise TypeError(
+            f"Use {type(self).__name__}.from_csv(), .from_list(), or .from_disk() "
+            "to construct a MoleculeDataset."
+        )
 
     @classmethod
     def from_csv(
@@ -111,17 +129,14 @@ class MoleculeDataset(torch.utils.data.Dataset):
         *,
         sep: str = ",",
         smiles_column: str = "smiles",
-        standardize: bool = False,
-        standardize_kwargs: dict | None = None,
         properties: list[str] | None = None,
         recompute_properties: bool = False,
-        representations: dict[str, dict] | None = None,
         batch_size: int = 512,
         num_proc: int = 1,
         save_to: str | PathLike | None = None,
         tmp_dir: str | PathLike | None = None,
     ) -> "MoleculeDataset":
-        """Parse a CSV/TSV file with molecules in rows, and materialize an Arrow dataset.
+        """Parse a CSV/TSV file with molecules in rows and materialize an Arrow dataset.
 
         Parameters
         ----------
@@ -132,43 +147,26 @@ class MoleculeDataset(torch.utils.data.Dataset):
         smiles_column : str
             Header name of the SMILES column. Renamed to ``"smiles"`` if
             different.
-        standardize : bool, default False
-            If True, run :meth:`Molecule.standardize` on each row and
-            replace the ``smiles`` column with the result. Rows whose
-            standardization returns ``None`` are dropped.
-        standardize_kwargs : dict, optional
-            Forwarded to :meth:`Molecule.standardize` (e.g.
-            ``{"canonicalize_tautomers": True, "remove_stereo": True}``).
         properties : list[str], optional
-            Names from :data:`PROPERTIES` to materialize as columns
-            (``canonical_smiles``, ``inchi``, ``inchikey``, ``inchikey_2d``,
-            ``formula``, ``exact_mass``). Column names match the property
-            names exactly; no aliases are recognised.
+            Properties to materialize as columns
+            Any of (``canonical_smiles``, ``inchi``, ``inchikey``,
+            `inchikey_2d``, ``formula``, ``exact_mass``).
+            Other names/RDKit properties are not implemented.
         recompute_properties : bool, default False
-            If False, skip computing a property whose column already
-            exists in the input. If True, always (re)compute. Note:
-            ``standardize=True`` invalidates pre-existing property
-            columns; either drop them first or set this flag.
-        representations : dict[str, dict], optional
-            Canonical fingerprint column names (keys of :data:`_FP_INFO`)
-            mapped to ``build_kwargs`` forwarded to the registered
-            builder. Use ``{}`` for defaults, e.g. ``{"morgan": {},
-            "chemberta": {"device": "cuda", "model_name": "..."}}``.
+            If False, skip computing a property whose column already exists in
+            the input. If True, always (re)compute.
+            Note: Rows whose SMILES fails parsing for any requested property are dropped
         batch_size : int, default 512
-            Per-batch row count for :meth:`datasets.Dataset.map` during
-            the build pipeline.
+            Per-batch row count for :meth:`datasets.Dataset.map`.
         num_proc : int, default 1
-            Worker count for :meth:`datasets.Dataset.map`. Neural
-            representations are forced in-process so the model is loaded
-            once.
+            Worker count for :meth:`datasets.Dataset.map`.
         save_to : str or PathLike, optional
-            If given, stream the build to disk and persist to this path
-            (loadable with :meth:`from_disk`). If ``None`` (default), the
-            dataset is built in memory.
+            If given, persist the dataset to this path (loadable with
+            :meth:`from_disk`). If ``None`` (default), built in memory.
         tmp_dir : str or PathLike, optional
-            Parent directory for the build's transient cache. Defaults
-            to ``$TMPDIR``; override on HPC systems where ``$TMPDIR`` is
-            unset, points at a small ``/tmp``, or resolves to a ``tmpfs``.
+            Parent directory for the build's transient cache. Defaults to
+            ``$TMPDIR``; override on HPC systems where ``$TMPDIR`` is
+            unset or resolves to a small ``tmpfs``.
         """
         for prop in properties or []:
             if prop not in PROPERTIES:
@@ -191,97 +189,28 @@ class MoleculeDataset(torch.utils.data.Dataset):
             if smiles_column != "smiles":
                 ds = ds.rename_column(smiles_column, "smiles")
 
-            # Standardize → mutates smiles in place, drops failed rows.
-            # Must run before property/fingerprint computation since
-            # those derive from the (possibly updated) smiles column.
-            if standardize:
-                std_kw = standardize_kwargs or {}
-
-                def _std(s):
-                    if s is None:
-                        return None
-                    m = Molecule(s).standardize(**std_kw)
-                    return m.canonical_smiles if m is not None else None
-
-                ds = ds.map(
-                    lambda b: {"smiles": [_std(s) for s in b["smiles"]]},
-                    batched=True,
-                    batch_size=batch_size,
-                    num_proc=nproc,
-                    keep_in_memory=in_memory,
-                    desc="Standardizing",
-                )
-                before = len(ds)
-                ds = ds.filter(
-                    lambda r: r["smiles"] is not None,
-                    num_proc=nproc,
-                    keep_in_memory=in_memory,
-                )
-                if (dropped := before - len(ds)) > 0:
-                    tqdm.write(
-                        f"Standardization dropped {dropped} row(s) "
-                        "that could not be cleaned."
-                    )
-
             needed = [
                 p
                 for p in properties or []
                 if p not in ds.column_names or recompute_properties
             ]
             if needed:
-                cols_to_drop = [p for p in needed if p in ds.column_names]
-                if cols_to_drop:
-                    ds = ds.remove_columns(cols_to_drop)
-
-                def _props(batch):
-                    out = {p: [] for p in needed}
-                    for s in batch["smiles"]:
-                        try:
-                            m = Molecule(s)
-                            vals = {p: getattr(m, p) for p in needed}
-                        except Exception:
-                            vals = {p: None for p in needed}
-                        for p in needed:
-                            out[p].append(vals[p])
-                    return out
-
-                ds = ds.map(
-                    _props,
-                    batched=True,
-                    batch_size=batch_size,
-                    num_proc=nproc,
-                    keep_in_memory=in_memory,
-                    desc="Computing properties",
-                )
-                before = len(ds)
-                ds = ds.filter(
-                    lambda r: r[needed[0]] is not None,
-                    num_proc=nproc,
-                    keep_in_memory=in_memory,
-                )
-                if (dropped := before - len(ds)) > 0:
-                    tqdm.write(
-                        f"Property computation dropped {dropped} row(s) "
-                        "with unparseable SMILES."
-                    )
-
-            for name, kw in (representations or {}).items():
-                ds = cls._add_fingerprint_column(
+                ds = cls._recompute_properties(
                     ds,
-                    name,
-                    kw,
+                    needed,
                     batch_size=batch_size,
-                    num_proc=num_proc,
-                    keep_in_memory=in_memory,
+                    nproc=nproc,
+                    in_memory=in_memory,
+                    cache_dir=cache_dir,
                 )
 
             if save_to is not None:
                 ds.save_to_disk(str(save_to))
                 ds = Dataset.load_from_disk(str(save_to))
-        return cls(ds)
+        return cls._create(ds)
 
     @classmethod
-    def from_smiles(
+    def from_list(
         cls,
         smiles: Iterable[Molecule | str],
         **kwargs,
@@ -289,17 +218,18 @@ class MoleculeDataset(torch.utils.data.Dataset):
         """Build from an in-memory iterable of SMILES or :class:`Molecule`.
 
         Convenience wrapper over :meth:`from_csv` for the "no extra
-        columns" case: writes the SMILES to a temp file and delegates.
-        ``**kwargs`` forward to :meth:`from_csv`; don't pass ``sep`` or
-        ``smiles_column``. For datasets with extra columns, use
-        :meth:`from_csv` directly or wrap your own HF Dataset.
+        columns" case.
 
         Parameters
         ----------
         smiles : iterable of str or Molecule
             Per-row SMILES (mixed types accepted).
+        **kwargs
+            Forwarded to :meth:`from_csv`. Accepts ``properties``,
+            ``recompute_properties``, ``batch_size``, ``num_proc``,
+            ``save_to``, and ``tmp_dir``. Do not pass ``sep`` or
+            ``smiles_column``.
         """
-
         smiles_list = [s.smiles if isinstance(s, Molecule) else s for s in smiles]
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as f:
             f.write("smiles\n")
@@ -311,76 +241,240 @@ class MoleculeDataset(torch.utils.data.Dataset):
             os.unlink(path)
 
     @classmethod
+    def _create(cls, ds: Dataset) -> "MoleculeDataset":
+        """
+        Private initialization helper method.
+        """
+        obj = object.__new__(cls)
+        obj.ds = ds.with_format("torch")
+        return obj
+
+    @classmethod
     def from_disk(cls, path: str | PathLike) -> "MoleculeDataset":
-        """Load a previously saved Arrow directory."""
-        return cls(Dataset.load_from_disk(str(path)))
+        """
+        Load a previously saved ``MoleculeDataset`` from an Arrow directory.
 
-    def __len__(self) -> int:
-        return len(self.ds)
+        Parameters
+        ----------
+        path : str or PathLike
+            Directory previously written by :meth:`save_to`,
+            :meth:`from_list` / :meth:`from_mgf` with ``save_to=...``.
 
-    def __getitem__(self, i: int) -> dict:
-        return self.ds[i]
+        Returns
+        -------
+        MoleculeDataset
+        """
+        return cls._create(Dataset.load_from_disk(str(path)))
 
-    def col_to_numpy(self, name: str) -> np.ndarray:
-        """Return a column as a numpy array."""
-        return self.ds.data.column(name).to_numpy(zero_copy_only=False)
+    def save_to(self, path: str | PathLike) -> None:
+        """Persist the underlying HF Dataset to disk in a directory of Arrow shards.
 
-    def filter(self, predicate: Callable[[dict], bool], **kwargs) -> "MoleculeDataset":
-        """Return a new dataset keeping rows where ``predicate`` is truthy."""
-        return type(self)(self.ds.filter(predicate, **kwargs))
+        Parameters
+        ----------
+        path : str or PathLike
+            Destination directory. Loadable via :meth:`from_disk`.
+        """
+        self.ds.save_to_disk(str(path))
 
-    def add_fingerprint(
+    @staticmethod
+    def _recompute_properties(
+        ds: Dataset,
+        properties: list[str],
+        *,
+        batch_size: int,
+        nproc: int | None,
+        in_memory: bool,
+        cache_dir: str | None = None,
+    ) -> Dataset:
+        """Drop and recompute ``properties`` columns from the ``smiles`` column.
+
+        Rows whose SMILES fails parsing for any requested property are dropped.
+        """
+        cols_to_drop = [p for p in properties if p in ds.column_names]
+        if cols_to_drop:
+            ds = ds.remove_columns(cols_to_drop)
+
+        def _props(batch):
+            out = {p: [] for p in properties}
+            for s in batch["smiles"]:
+                try:
+                    m = Molecule(s)
+                    vals = {p: getattr(m, p) for p in properties}
+                except Exception:
+                    vals = {p: None for p in properties}
+                for p in properties:
+                    out[p].append(vals[p])
+            return out
+
+        ds = ds.map(
+            _props,
+            batched=True,
+            batch_size=batch_size,
+            num_proc=nproc,
+            keep_in_memory=in_memory,
+            cache_file_name=None
+            if (in_memory or cache_dir is None)
+            else os.path.join(cache_dir, uuid.uuid4().hex + ".arrow"),
+            desc="Computing properties",
+        )
+        before = len(ds)
+        ds = ds.filter(
+            lambda r: all(r[p] is not None for p in properties),
+            num_proc=nproc,
+            keep_in_memory=in_memory,
+            cache_file_name=None
+            if (in_memory or cache_dir is None)
+            else os.path.join(cache_dir, uuid.uuid4().hex + ".arrow"),
+        )
+        if (dropped := before - len(ds)) > 0:
+            tqdm.write(
+                f"Property computation dropped {dropped} row(s) "
+                "with unparseable SMILES."
+            )
+        return ds
+
+    def standardize(
         self,
-        name: str,
-        build_kwargs: dict | None = None,
+        *,
+        standardize_kwargs: dict | None = None,
+        batch_size: int = 512,
+        num_proc: int = 1,
+        save_to: str | PathLike | None = None,
+        tmp_dir: str | PathLike | None = None,
+    ) -> "MoleculeDataset":
+        """Standardize the ``smiles`` column, dropping rows that fail cleanup.
+
+        Replaces each SMILES with its standardized canonical form via
+        :meth:`metabo_depthcharge.chem.Molecule.standardize`. Rows whose standardization returns
+        ``None`` are dropped.
+
+        Parameters
+        ----------
+        standardize_kwargs : dict, optional
+            Forwarded to :meth:`metabo_depthcharge.chem.Molecule.standardize` (e.g.
+            ``{"canonicalize_tautomers": True, "remove_stereo": True}``).
+        batch_size : int, default 512
+            Per-batch row count for :meth:`datasets.Dataset.map`.
+        num_proc : int, default 1
+            Worker count for :meth:`datasets.Dataset.map`.
+        save_to : str or PathLike, optional
+            If given, persist the result to this path. If ``None`` (default),
+            built in memory.
+        tmp_dir : str or PathLike, optional
+            Parent directory for the build's transient cache. Defaults to
+            ``$TMPDIR``; override on HPC systems where ``$TMPDIR`` is
+            unset or resolves to a small ``tmpfs``.
+        """
+        std_kw = standardize_kwargs or {}
+        in_memory = save_to is None
+        nproc = num_proc if num_proc > 1 else None
+
+        def _std(s):
+            if s is None:
+                return None
+            m = Molecule(s).standardize(**std_kw)
+            return m.canonical_smiles if m is not None else None
+
+        with hf_tempcache(dir=tmp_dir) as cache_dir:
+            ds = self.ds.map(
+                lambda b: {"smiles": [_std(s) for s in b["smiles"]]},
+                batched=True,
+                batch_size=batch_size,
+                num_proc=nproc,
+                keep_in_memory=in_memory,
+                cache_file_name=None
+                if (in_memory or cache_dir is None)
+                else os.path.join(cache_dir, uuid.uuid4().hex + ".arrow"),
+                desc="Standardizing",
+            )
+            before = len(ds)
+            ds = ds.filter(
+                lambda r: r["smiles"] is not None,
+                num_proc=nproc,
+                keep_in_memory=in_memory,
+                cache_file_name=None
+                if (in_memory or cache_dir is None)
+                else os.path.join(cache_dir, uuid.uuid4().hex + ".arrow"),
+            )
+            if (dropped := before - len(ds)) > 0:
+                tqdm.write(
+                    f"Standardization dropped {dropped} row(s) "
+                    "that could not be cleaned."
+                )
+
+            # Property columns derived from the old SMILES are now stale; recompute.
+            stale = [p for p in PROPERTIES if p in ds.column_names]
+            if stale:
+                ds = self._recompute_properties(
+                    ds,
+                    stale,
+                    batch_size=batch_size,
+                    nproc=nproc,
+                    in_memory=in_memory,
+                    cache_dir=cache_dir,
+                )
+
+            if save_to is not None:
+                ds.save_to_disk(str(save_to))
+                ds = Dataset.load_from_disk(str(save_to))
+        return type(self)._create(ds)
+
+    def add_representations(
+        self,
+        representations: dict[str, dict | None],
         *,
         batch_size: int = 512,
         num_proc: int = 1,
         save_to: str | PathLike | None = None,
         tmp_dir: str | PathLike | None = None,
     ) -> "MoleculeDataset":
-        """Append a fingerprint column to an already-built dataset.
+        """Append one or more molecular representation columns.
 
         Parameters
         ----------
-        name : str
-            Canonical fingerprint name (key of :data:`_FP_INFO`).
-        build_kwargs : dict, optional
-            Forwarded to the registered builder (e.g.
-            ``{"device": "cuda"}`` for neural FPs).
+        representations : dict[str, dict | None]
+            A dict of molecular representation type names as keys, each mapped to a dict of keyword arguments
+            for the builder or ``None`` for defaults.
+            Valid names: ``"morgan"``, ``"morgan_count"``, ``"rdkit"``,
+            ``"rdkit_count"``, ``"maccs"``, ``"biosynfoni"``, ``"map4"``,
+            ``"chemberta"``, ``"molformer"``.
+            See :mod:`~metabo_depthcharge.chem.representations` for builder
+            keyword arguments.
+            E.g. ``{"morgan": None, "chemberta": {"device": "cuda"}}``.
         batch_size : int, default 512
             Per-batch row count for :meth:`datasets.Dataset.map`.
         num_proc : int, default 1
-            Worker count for :meth:`datasets.Dataset.map`. Neural FPs
-            are forced in-process.
+            Worker count for :meth:`datasets.Dataset.map`. Neural
+            representations are forced in-process so the model is loaded once.
         save_to : str or PathLike, optional
-            If given, persist the resulting dataset to this path.
+            If given, persist the result to this path. (loadable with
+            :meth:`from_disk`). Pass the same path as the original dataset
+            to update it in place.
         tmp_dir : str or PathLike, optional
-            Parent directory for the build's transient cache. Defaults
-            to ``$TMPDIR``.
-
-        Returns
-        -------
-        MoleculeDataset
-            New dataset with the column added.
+            Parent directory for the build's transient cache. Defaults to
+            ``$TMPDIR``; override on HPC systems where ``$TMPDIR`` is
+            unset or resolves to a small ``tmpfs``.
         """
         in_memory = save_to is None
-        with hf_tempcache(dir=tmp_dir):
-            ds = self._add_fingerprint_column(
-                self.ds,
-                name,
-                build_kwargs,
-                batch_size=batch_size,
-                num_proc=num_proc,
-                keep_in_memory=in_memory,
-            )
-        if save_to is not None:
-            ds.save_to_disk(str(save_to))
-            ds = Dataset.load_from_disk(str(save_to))
-        return type(self)(ds)
+        with hf_tempcache(dir=tmp_dir) as cache_dir:
+            ds = self.ds
+            for name, kw in representations.items():
+                ds = self._add_representation_column(
+                    ds,
+                    name,
+                    kw,
+                    batch_size=batch_size,
+                    num_proc=num_proc,
+                    keep_in_memory=in_memory,
+                    cache_dir=cache_dir,
+                )
+            if save_to is not None:
+                ds.save_to_disk(str(save_to))
+                ds = Dataset.load_from_disk(str(save_to))
+        return type(self)._create(ds)
 
     @staticmethod
-    def _add_fingerprint_column(
+    def _add_representation_column(
         ds: Dataset,
         name: str,
         build_kwargs: dict | None = None,
@@ -388,16 +482,16 @@ class MoleculeDataset(torch.utils.data.Dataset):
         batch_size: int,
         num_proc: int,
         keep_in_memory: bool,
+        cache_dir: str | None = None,
     ) -> Dataset:
-        """Compute and append fingerprint column(s) onto ``ds`` for ``name``.
+        """Compute and append representation column(s) onto ``ds`` for ``name``.
 
-        ``name`` must be a key of :data:`_FP_INFO`; ``build_kwargs`` is
-        forwarded to the registered builder (e.g. ``{"device": "cuda"}``
-        for neural FPs, ``{"model_name": "..."}`` for ChemBERTa/MolFormer).
+        Helper function for add_representation().
+        See add_representation() for parameter descriptions.
         """
         if name not in _FP_INFO:
             raise ValueError(
-                f"Unknown fingerprint column {name!r}; "
+                f"Unknown representation name {name!r}; "
                 f"must be one of {sorted(_FP_INFO)}"
             )
         repr_info = _FP_INFO[name]
@@ -421,7 +515,18 @@ class MoleculeDataset(torch.utils.data.Dataset):
         def map_batched(batch):
             if rep_cache[0] is None:
                 rep_cache[0] = _FP_INFO[name]["build"](**build_kwargs)
-            mols = [Molecule(s) for s in batch["smiles"]]
+            try:
+                mols = [Molecule(s) for s in batch["smiles"]]
+            except Exception as exc:
+                bad = next(
+                    (s for s in batch["smiles"] if not isinstance(s, str) or s == ""),
+                    None,
+                )
+                raise ValueError(
+                    f"Representation computation failed — dataset contains unparseable "
+                    f"SMILES (first bad value: {bad!r}). "
+                    "Filter rows with None/invalid SMILES before calling add_representations."
+                ) from exc
             fps = np.asarray(rep_cache[0](mols))
             if kind == "dense":
                 return {name: fps.astype(np.float32, copy=False)}
@@ -442,13 +547,109 @@ class MoleculeDataset(torch.utils.data.Dataset):
             num_proc=nproc,
             features=Features({**ds.features, **new_cols}),
             keep_in_memory=keep_in_memory,
+            cache_file_name=None
+            if (keep_in_memory or cache_dir is None)
+            else os.path.join(cache_dir, uuid.uuid4().hex + ".arrow"),
             new_fingerprint=uuid.uuid4().hex,
             desc=f"Computing {name}",
         )
 
-    def save_to(self, path: str | PathLike) -> None:
-        """Persist the underlying HF Dataset to disk as Arrow shards."""
-        self.ds.save_to_disk(str(path))
+    def col_to_numpy(self, name: str) -> np.ndarray:
+        """Return a dataset column as a numpy array.
+
+        Parameters
+        ----------
+        name : str
+            Column name.
+
+        Returns
+        -------
+        np.ndarray
+        """
+        return self.ds.data.column(name).to_numpy(zero_copy_only=False)
+
+    def filter(self, condition: Callable[[dict], bool], **kwargs) -> "MoleculeDataset":
+        """Return a new dataset keeping only rows where ``condition`` is truthy.
+
+        Parameters
+        ----------
+        condition : Callable[[dict], bool]
+            Row-wise condition as a callable taking a dict and returning a bool.
+            The input dict keys are the dataset's columns, e.g. properties.
+        **kwargs
+            Passed to :meth:`datasets.Dataset.filter`. Common knobs:
+            ``num_proc=8`` for parallelism, ``keep_in_memory=True`` to avoid
+            writing a cache file.
+
+        Returns
+        -------
+        MoleculeDataset
+
+        Examples
+        --------
+        .. code-block:: python
+
+            ds.filter(lambda r: r["exact_mass"] < 1000)
+        """
+        return type(self)._create(self.ds.filter(condition, **kwargs))
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, i: int) -> dict:
+        return self.ds[i]
+
+    @staticmethod
+    def _densify(
+        indices: list,
+        fp_size: int,
+        values: list | None = None,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        """Densify sparse fingerprint rows into a ``(B, fp_size)`` tensor.
+        Used by the collater to construct batches of sparse representations.
+        """
+        out = torch.zeros((len(indices), fp_size), dtype=dtype)
+        for b, idx in enumerate(indices):
+            idx = idx.long()
+            if values is None:
+                out[b, idx] = 1
+            else:
+                out[b, idx] = values[b].to(dtype)
+        return out
+
+    @staticmethod
+    def collate(batch: list[dict]) -> dict:
+        """Stack/densify a batch of rows into batched torch tensors.
+        Pass as ``collate_fn`` to :class:`torch.utils.data.DataLoader`.
+        """
+        out = {"smiles": [r["smiles"] for r in batch]}
+        skip = {"smiles"}
+        for name, spec in _FP_INFO.items():
+            if name not in batch[0]:
+                continue
+            kind, size = spec["kind"], spec["size"]
+            if kind == "dense":
+                out[name] = torch.stack(
+                    [torch.as_tensor(r[name], dtype=torch.float32) for r in batch]
+                )
+                skip.add(name)
+            elif kind == "binary":
+                out[name] = MoleculeDataset._densify([r[name] for r in batch], size)
+                skip.add(name)
+            else:  # count
+                out[name] = MoleculeDataset._densify(
+                    [r[name] for r in batch],
+                    size,
+                    values=[r[f"{name}_values"] for r in batch],
+                )
+                skip.add(name)
+                skip.add(f"{name}_values")
+        for k in batch[0]:
+            if k in skip:
+                continue
+            out[k] = [r[k] for r in batch]
+        return out
 
     def construct_mol_embedder(
         self,
@@ -482,16 +683,15 @@ class MoleculeDataset(torch.utils.data.Dataset):
         -------
         MolEmbedder or MultiMolEmbedder
         """
-
         for name in fp_names:
             if name not in _FP_INFO:
                 raise ValueError(
-                    f"Unknown fingerprint {name!r}; must be one of {sorted(_FP_INFO)}"
+                    f"Unknown representation name {name!r}; must be one of {sorted(_FP_INFO)}"
                 )
             if name not in self.ds.column_names:
                 raise ValueError(
                     f"Column {name!r} not found in this dataset; "
-                    "call add_fingerprint() first."
+                    "call add_representations() first."
                 )
 
         fp_types = [_FP_INFO[n]["kind"] for n in fp_names]
@@ -523,7 +723,10 @@ class MoleculeDataset(torch.utils.data.Dataset):
 
     @staticmethod
     def _max_counts_from_sparse(ds: Dataset, name: str, fp_size: int) -> torch.Tensor:
-        """Compute per-bit max count across all rows of a sparse count column."""
+        """Compute per-bit max count across all rows of a sparse count column.
+
+        Used in get_mol_embedder() to normalise count fingerprints for MolEmbedder.
+        """
         flat_idx = (
             ds.data.column(name)
             .combine_chunks()
@@ -539,54 +742,3 @@ class MoleculeDataset(torch.utils.data.Dataset):
         max_c = np.zeros(fp_size, dtype=np.float32)
         np.maximum.at(max_c, flat_idx, flat_val)
         return torch.from_numpy(max_c)
-
-    @staticmethod
-    def _densify(
-        indices: list,
-        fp_size: int,
-        values: list | None = None,
-        dtype: torch.dtype = torch.float32,
-    ) -> torch.Tensor:
-        """Densify sparse fingerprint rows into a ``(B, fp_size)`` tensor.
-        Used by the collater to construct batches of sparse representations.
-        """
-        out = torch.zeros((len(indices), fp_size), dtype=dtype)
-        for b, idx in enumerate(indices):
-            idx = idx.long()
-            if values is None:
-                out[b, idx] = 1
-            else:
-                out[b, idx] = values[b].to(dtype)
-        return out
-
-    def collate(self, batch: list[dict]) -> dict:
-        """Stack/densify a batch of rows into batched torch tensors.
-        Pass as ``collate_fn`` to :class:`torch.utils.data.DataLoader`.
-        """
-        out = {"smiles": [r["smiles"] for r in batch]}
-        skip = {"smiles"}
-        for name, spec in _FP_INFO.items():
-            if name not in batch[0]:
-                continue
-            kind, size = spec["kind"], spec["size"]
-            if kind == "dense":
-                out[name] = torch.stack(
-                    [torch.as_tensor(r[name], dtype=torch.float32) for r in batch]
-                )
-                skip.add(name)
-            elif kind == "binary":
-                out[name] = self._densify([r[name] for r in batch], size)
-                skip.add(name)
-            else:  # count
-                out[name] = self._densify(
-                    [r[name] for r in batch],
-                    size,
-                    values=[r[f"{name}_values"] for r in batch],
-                )
-                skip.add(name)
-                skip.add(f"{name}_values")
-        for k in batch[0]:
-            if k in skip:
-                continue
-            out[k] = [r[k] for r in batch]
-        return out
