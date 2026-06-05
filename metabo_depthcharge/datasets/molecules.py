@@ -301,7 +301,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
                     m = Molecule(s)
                     vals = {p: getattr(m, p) for p in properties}
                 except Exception:
-                    vals = {p: None for p in properties}
+                    vals = dict.fromkeys(properties)
                 for p in properties:
                     out[p].append(vals[p])
             return out
