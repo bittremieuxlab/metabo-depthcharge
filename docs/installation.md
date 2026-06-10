@@ -1,8 +1,6 @@
 # Installation
 
-`metabo-depthcharge` requires Python ≥ 3.10. All runtime ML dependencies
-(`torch`, `lightning`, `depthcharge-ms`, `transformers`) are installed by
-default — there is no `nn` extra to opt into.
+`metabo-depthcharge` requires Python ≥ 3.10.
 
 The package is not yet on PyPI; install directly from GitHub.
 
@@ -44,5 +42,5 @@ See [Contributing](contributing.md) for the full dev workflow.
 
 There is a single `dev` extra that bundles everything a contributor needs:
 tests (`pytest`), lint (`ruff`, `pre-commit`), and the docs toolchain
-(`sphinx`, `furo`, `myst-parser`, …). Install it from a clone with
+(`sphinx`, `myst-parser`, ...). Install it from a clone with
 `pip install -e ".[dev]"` or `uv sync --extra dev`.

@@ -19,6 +19,20 @@ Every entry in ``ADDUCT_VOCAB`` must have a corresponding mass delta in
 _PROTON = 1.007276
 
 
+#: List of adduct strings carrying a categorical embedding index. Checkpoint-stable:
+#: append-only, never reorder or remove without retraining. Each adduct's index
+#: is its 1-based position below; index 0 is reserved for unknown/missing:
+#:
+#: * ``0`` — unknown / missing
+#: * ``1`` — ``[M+H]+``
+#: * ``2`` — ``[M+Na]+``
+#: * ``3`` — ``[M+K]+``
+#: * ``4`` — ``[M+NH4]+``
+#: * ``5`` — ``[M]+``
+#: * ``6`` — ``[M-H]-``
+#: * ``7`` — ``[M+Cl]-``
+#: * ``8`` — ``[M+HCOOH-H]-``
+#: * ``9`` — ``[M+CH3COOH-H]-``
 ADDUCT_VOCAB = [
     "[M+H]+",
     "[M+Na]+",
@@ -34,9 +48,9 @@ _ADDUCT_TO_IDX = {a: i + 1 for i, a in enumerate(ADDUCT_VOCAB)}
 N_ADDUCTS = len(ADDUCT_VOCAB) + 1  # +1 for unknown at index 0
 
 
-# Mass added to neutral M to give the observed precursor m/z. Keys aligned
-# with ADDUCT_VOCAB where overlapping; may include additional adducts not
-# in the categorical vocabulary.
+#: Mass added to neutral M to give the observed precursor m/z. Keys aligned
+#: with ``ADDUCT_VOCAB`` where overlapping; may include additional adducts not
+#: in the categorical vocabulary.
 ADDUCT_MASS: dict[str, float] = {
     "[M+H]+": +_PROTON,
     "[M-H]-": -_PROTON,
@@ -56,7 +70,16 @@ assert set(ADDUCT_VOCAB) <= set(ADDUCT_MASS), (
 
 
 def encode_adduct(adduct_str: str) -> int:
-    """Vocab index for the adduct string; 0 for unknown/missing."""
+    """Vocab index for the adduct string; 0 for unknown/missing.
+
+    See Also
+    --------
+    ADDUCT_VOCAB : The adduct-to-index vocabulary this looks up, including the
+        full index assignment.
+    ~metabo_depthcharge.spec.metadata_parsers.METADATA_PARSERS : Registry that
+        wires this in as the row-wise parser for the ``adduct`` metadata field,
+        consumed by ``SpectrumDataset`` at build time.
+    """
     if not adduct_str or adduct_str in ("nan", "None", ""):
         return 0
     return _ADDUCT_TO_IDX.get(adduct_str.strip(), 0)

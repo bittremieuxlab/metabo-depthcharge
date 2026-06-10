@@ -11,8 +11,8 @@ from metabo_depthcharge.encoders import (  # noqa: E402
     MolMLP,
     MultiMolMLP,
     PeakEncoder,
-    ResidualProjection,
-    SpectrumEmbedder,
+    ResidualNetwork,
+    SpectrumEncoder,
 )
 
 
@@ -116,26 +116,26 @@ def test_attn_aggregator_no_mask():
 
 
 # ---------------------------------------------------------------------------
-# ResidualProjection
+# ResidualNetwork
 # ---------------------------------------------------------------------------
 
 
-def test_residual_projection_same_dim():
-    proj = ResidualProjection(d_in=32, d_out=32, n_layers=0)
+def test_residual_network_same_dim():
+    proj = ResidualNetwork(d_in=32, d_out=32, n_blocks=0)
     x = torch.rand(4, 32)
     out = proj(x)
     assert out.shape == (4, 32)
 
 
-def test_residual_projection_different_dim():
-    proj = ResidualProjection(d_in=256, d_out=512, n_layers=0)
+def test_residual_network_different_dim():
+    proj = ResidualNetwork(d_in=256, d_out=512, n_blocks=0)
     x = torch.rand(4, 256)
     out = proj(x)
     assert out.shape == (4, 512)
 
 
-def test_residual_projection_with_layers():
-    proj = ResidualProjection(d_in=64, d_out=64, n_layers=2)
+def test_residual_network_with_layers():
+    proj = ResidualNetwork(d_in=64, d_out=64, n_blocks=2)
     x = torch.rand(4, 64)
     out = proj(x)
     assert out.shape == (4, 64)
@@ -147,34 +147,38 @@ def test_residual_projection_with_layers():
 
 
 def test_mol_embedder_binary():
-    emb = MolMLP(fp_size=64, n_layers=2, d_model=32, fp_type="binary")
+    emb = MolMLP(rep_size=64, n_blocks=2, d_model=32, rep_type="binary")
     x = torch.randint(0, 2, (4, 64)).float()
     assert emb(x).shape == (4, 32)
 
 
 def test_mol_embedder_count():
     max_c = torch.rand(64) * 5 + 1
-    emb = MolMLP(fp_size=64, n_layers=2, d_model=32, fp_type="count", max_counts=max_c)
+    emb = MolMLP(
+        rep_size=64, n_blocks=2, d_model=32, rep_type="count", max_counts=max_c
+    )
     x = torch.randint(0, 5, (4, 64)).float()
     assert emb(x).shape == (4, 32)
 
 
 def test_mol_embedder_dense():
-    emb = MolMLP(fp_size=64, n_layers=2, d_model=32, fp_type="dense")
+    emb = MolMLP(rep_size=64, n_blocks=2, d_model=32, rep_type="dense")
     x = torch.randn(4, 64)
     assert emb(x).shape == (4, 32)
 
 
-def test_mol_embedder_zero_layers_identity():
-    emb = MolMLP(fp_size=32, n_layers=0, d_model=32, fp_type="binary")
+def test_mol_embedder_zero_blocks_identity():
+    # n_blocks=0 with rep_size == d_model is an exact pass-through (no final norm)
+    emb = MolMLP(rep_size=32, n_blocks=0, d_model=32, rep_type="binary")
     x = torch.rand(4, 32)
     out = emb(x)
     assert out.shape == (4, 32)
     assert torch.allclose(out, x)
 
 
-def test_mol_embedder_one_layer():
-    emb = MolMLP(fp_size=64, n_layers=1, d_model=32, fp_type="binary")
+def test_mol_embedder_zero_blocks_projection():
+    # n_blocks=0 with rep_size != d_model is a single linear projection
+    emb = MolMLP(rep_size=64, n_blocks=0, d_model=32, rep_type="binary")
     x = torch.rand(4, 64)
     assert emb(x).shape == (4, 32)
 
@@ -186,9 +190,9 @@ def test_mol_embedder_one_layer():
 
 def test_multi_mol_embedder_output_shape():
     emb = MultiMolMLP(
-        fp_names=["fp1", "fp2"],
-        fp_sizes=[64, 32],
-        n_layers=2,
+        rep_names=["fp1", "fp2"],
+        rep_sizes=[64, 32],
+        n_blocks=2,
         d_model=32,
     )
     fps = {"fp1": torch.rand(4, 64), "fp2": torch.rand(4, 32)}
@@ -198,11 +202,11 @@ def test_multi_mol_embedder_output_shape():
 def test_multi_mol_embedder_mixed_types():
     max_c = torch.rand(64) * 5 + 1
     emb = MultiMolMLP(
-        fp_names=["bin", "cnt", "dns"],
-        fp_sizes=[64, 64, 32],
-        n_layers=2,
+        rep_names=["bin", "cnt", "dns"],
+        rep_sizes=[64, 64, 32],
+        n_blocks=2,
         d_model=32,
-        fp_types=["binary", "count", "dense"],
+        rep_types=["binary", "count", "dense"],
         max_counts={"cnt": max_c},
     )
     fps = {
@@ -214,14 +218,13 @@ def test_multi_mol_embedder_mixed_types():
 
 
 # ---------------------------------------------------------------------------
-# SpectrumEmbedder
+# SpectrumEncoder
 # ---------------------------------------------------------------------------
 
 depthcharge = pytest.importorskip("depthcharge")
 
 B, L = 2, 8
 D_MODEL = 64
-D_OUT = 32
 N_LAYERS = 2
 
 
@@ -232,38 +235,50 @@ def _make_batch():
     return mz, intensity, precursor_mz
 
 
-def test_spectrum_embedder_forward_shape():
-    enc = SpectrumEmbedder(d_model=D_MODEL, n_layers=N_LAYERS, d_out=D_OUT)
+def test_spectrum_encoder_forward_shape():
+    enc = SpectrumEncoder(d_model=D_MODEL, n_layers=N_LAYERS)
     enc.eval()
     with torch.no_grad():
         out = enc(*_make_batch())
-    assert out.shape == (B, D_OUT)
+    assert out.shape == (B, D_MODEL)
 
 
-def test_spectrum_embedder_attention_pool():
-    enc = SpectrumEmbedder(
-        d_model=D_MODEL, n_layers=N_LAYERS, d_out=D_OUT, pool="attention"
-    )
+def test_spectrum_encoder_attention_pool():
+    enc = SpectrumEncoder(d_model=D_MODEL, n_layers=N_LAYERS, pool="attention")
     enc.eval()
     with torch.no_grad():
         out = enc(*_make_batch())
-    assert out.shape == (B, D_OUT)
+    assert out.shape == (B, D_MODEL)
 
 
-def test_spectrum_embedder_cls_pool():
-    enc = SpectrumEmbedder(d_model=D_MODEL, n_layers=N_LAYERS, d_out=D_OUT, pool="cls")
+def test_spectrum_encoder_cls_pool():
+    enc = SpectrumEncoder(d_model=D_MODEL, n_layers=N_LAYERS, pool="cls")
     enc.eval()
     with torch.no_grad():
         out = enc(*_make_batch())
-    assert out.shape == (B, D_OUT)
+    assert out.shape == (B, D_MODEL)
 
 
-def test_spectrum_embedder_with_metadata():
+def test_spectrum_encoder_no_pool_returns_sequence_and_mask():
+    enc = SpectrumEncoder(d_model=D_MODEL, n_layers=N_LAYERS, pool=None)
+    enc.eval()
+    with torch.no_grad():
+        out, mask = enc(*_make_batch())
+    assert out.shape == (B, L + 1, D_MODEL)
+    assert mask.shape == (B, L + 1)
+    assert mask.dtype == torch.bool
+
+
+def test_spectrum_encoder_invalid_pool():
+    with pytest.raises(ValueError, match="Unknown pool mode"):
+        SpectrumEncoder(d_model=D_MODEL, n_layers=N_LAYERS, pool="max")
+
+
+def test_spectrum_encoder_with_metadata():
     meta_enc = MetadataEncoder(d_model=D_MODEL, metadata_fields=["adduct"])
-    enc = SpectrumEmbedder(
+    enc = SpectrumEncoder(
         d_model=D_MODEL,
         n_layers=N_LAYERS,
-        d_out=D_OUT,
         metadata_encoder=meta_enc,
     )
     enc.eval()
@@ -271,4 +286,4 @@ def test_spectrum_embedder_with_metadata():
     meta = {"adduct": torch.ones(B, dtype=torch.long)}
     with torch.no_grad():
         out = enc(mz, intensity, precursor_mz, metadata=meta)
-    assert out.shape == (B, D_OUT)
+    assert out.shape == (B, D_MODEL)

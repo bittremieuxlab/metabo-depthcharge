@@ -1,9 +1,11 @@
+import warnings
+
 import torch
 import torch.nn as nn
 from depthcharge.encoders import FloatEncoder
 from depthcharge.transformers import SpectrumTransformerEncoder
 
-from metabo_depthcharge.encoders.nn import AttnAggregator, ResidualProjection
+from metabo_depthcharge.encoders.nn import AttnAggregator
 from metabo_depthcharge.mist_cf.nn_utils import get_embedder
 from metabo_depthcharge.spec.adducts import N_ADDUCTS
 from metabo_depthcharge.spec.metadata_parsers import N_INSTRUMENTS
@@ -12,9 +14,33 @@ from metabo_depthcharge.spec.metadata_parsers import N_INSTRUMENTS
 class MetadataEncoder(nn.Module):
     """Encode spectrum acquisition metadata into a ``d_model`` vector.
 
-    Each enabled field gets its own encoder. Outputs are summed.
-    Missing values (index 0 for categoricals, 0.0 for CE) contribute
-    zero to the output for that sample.
+    Encodes the fields of an input metadata dictionary, each with its own encoder:
+    The per-field outputs are summed into a single ``(B, d_model)`` vector.
+
+    - ``"adduct"`` — a categorical index into the adduct vocabulary.
+      See :func:`~metabo_depthcharge.spec.adducts.encode_adduct` for encoding
+      adducts to integers.
+      Embedded via :class:`torch.nn.Embedding`.
+      Unknown adducts should be passed as 0, which is assigned
+      a zero embedding.
+    - ``"instrument_type"`` — a categorical index into the instrument
+      vocabulary. See
+      :func:`~metabo_depthcharge.spec.metadata_parsers.encode_instrument` for
+      encoding instruments to integers.
+      Embedded via :class:`torch.nn.Embedding`.
+      Unknown instruments should be passed as 0, which is assigned
+      a zero embedding.
+    - ``"collision_energy"`` — a single continuous value. See
+      :func:`~metabo_depthcharge.spec.metadata_parsers.encode_collision_energy`
+      for parsing raw values to the float consumed here.
+      Projected from one dimension to ``d_model`` by a
+      :class:`torch.nn.Linear`. A value of ``0.0`` is treated as missing and
+      masked back to zeros after the projection (the bias would otherwise
+      leak a nonzero embedding).
+
+    Missing values (index 0 for the categoricals, ``0.0`` for collision
+    energy) therefore contribute zero to the sum for that sample, and only
+    the fields listed in ``metadata_fields`` are instantiated.
 
     Parameters
     ----------
@@ -75,6 +101,11 @@ class MetadataEncoder(nn.Module):
             parts.append(self.instrument_emb(metadata["instrument_type"].long()))
 
         if not parts:
+            warnings.warn(
+                f"MetadataEncoder has fields {self.metadata_fields} enabled, "
+                "but none were present in the forward() input; contributing zeros.",
+                stacklevel=2,
+            )
             return 0
 
         return sum(parts)
@@ -83,9 +114,11 @@ class MetadataEncoder(nn.Module):
 class PeakEncoder(nn.Module):
     """Encode (m/z, intensity) peak pairs into ``d_model``-dimensional vectors.
 
-    Differs from depthcharge's default ``PeakEncoder``: instead of concatenating
-    the m/z and intensity encodings and projecting, it sums them, matching
-    Vaswani et al. original transformer formulation.
+    Differs from depthcharge's default
+    `PeakEncoder <https://wfondrie.github.io/depthcharge/latest/api/encoders/#depthcharge.encoders.PeakEncoder>`_: instead of
+    concatenating the m/z and intensity encodings and projecting, it sums
+    them, matching the original transformer formulation of Vaswani et al.
+    [1]_.
 
     Parameters
     ----------
@@ -95,6 +128,12 @@ class PeakEncoder(nn.Module):
         Minimum wavelength for m/z sinusoidal encoding.
     max_mz_wavelength : float
         Maximum wavelength for m/z sinusoidal encoding.
+
+    References
+    ----------
+    .. [1] Vaswani, Ashish, et al. "Attention Is All You
+       Need." Advances in Neural Information Processing Systems 30 (2017).
+       https://arxiv.org/abs/1706.03762
     """
 
     def __init__(
@@ -120,6 +159,8 @@ class PeakEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Encode a batch of peak sequences.
 
+        Note that we expect intensities to fall within the interval ``[0, 1]``.
+
         Parameters
         ----------
         x : torch.Tensor
@@ -134,33 +175,35 @@ class PeakEncoder(nn.Module):
         return self.mz_encoder(x[:, :, 0]) + self.int_encoder(x[:, :, 1])
 
 
-class SpectrumEmbedder(SpectrumTransformerEncoder):
+class SpectrumEncoder(SpectrumTransformerEncoder):
     """Spectrum encoder based on depthcharge's ``SpectrumTransformerEncoder``.
 
-    Wraps ``SpectrumTransformerEncoder`` + pooling + projection into a single
-    module with the contract:
-    ``forward(mz, intensity, precursor_mz) -> (B, d_out)``.
+    Wraps `SpectrumTransformerEncoder
+    <https://wfondrie.github.io/depthcharge/latest/api/transformers/#depthcharge.transformers.SpectrumTransformerEncoder>`_
+    + optional subformulae, metadata, and pooling into a single module.
+    Note that the ``dim_feedforward`` argument of the underlying transformer is fixed to
+    ``d_model * 4``, following the original transformer architecture.
 
     Parameters
     ----------
     d_model : int, default 512
-        Transformer hidden dimension.
+        Transformer hidden dimension (also the output dimension).
     n_layers : int, default 8
         Number of transformer layers.
+    nhead : int, default 8
+        Number of attention heads per layer; ``d_model`` must be divisible
+        by ``nhead``.
     dropout : float, default 0.15
         Dropout rate.
     min_mz_wavelength : float, default 0.001
         Min wavelength for m/z positional encoding.
     max_mz_wavelength : float, default 10000
         Max wavelength for m/z positional encoding.
-    pool : str, default "attention"
-        Pooling method — ``"attention"`` (learned weighted sum) or
-        ``"cls"`` (first token).
-    d_out : int, default 512
-        Output embedding dimension (after projection).
-    n_proj_layers : int, default 0
-        Number of residual blocks in the output projection
-        (0 = linear only).
+    pool : str or None, default "attention"
+        Pooling applied to the transformer output: ``"attention"`` (learned
+        weighted sum over tokens, i.e. :class:`AttnAggregator`), ``"cls"``
+        (global/first token), or ``None`` to skip pooling and return the full
+        token sequence together with its padding mask.
     subformula_encoder : nn.Module, optional
         :class:`SubformulaEncoder` whose output is added to peak embeddings
         before the transformer.
@@ -173,18 +216,17 @@ class SpectrumEmbedder(SpectrumTransformerEncoder):
         self,
         d_model: int = 512,
         n_layers: int = 8,
+        nhead: int = 8,
         dropout: float = 0.15,
         min_mz_wavelength: float = 0.001,
         max_mz_wavelength: float = 10_000,
-        pool: str = "attention",
-        d_out: int = 512,
-        n_proj_layers: int = 0,
+        pool: str | None = "attention",
         subformula_encoder: nn.Module | None = None,
         metadata_encoder: nn.Module | None = None,
     ):
         super().__init__(
             d_model=d_model,
-            nhead=8,
+            nhead=nhead,
             dim_feedforward=d_model * 4,
             n_layers=n_layers,
             dropout=dropout,
@@ -197,20 +239,13 @@ class SpectrumEmbedder(SpectrumTransformerEncoder):
 
         self.precursor_cls = nn.Embedding(1, d_model)
 
-        self.pool_mode = pool
-        if pool == "attention":
-            self.aggregator = AttnAggregator(d_model)
-        elif pool == "cls":
-            self.aggregator = None
-        else:
+        if pool not in ("attention", "cls", None):
             raise ValueError(f"Unknown pool mode: {pool}")
+        self.pool_mode = pool
+        self.aggregator = AttnAggregator(d_model) if pool == "attention" else None
 
         self.subformula_encoder = subformula_encoder
         self.metadata_encoder = metadata_encoder
-
-        self.proj = ResidualProjection(
-            d_model, d_out, n_layers=n_proj_layers, dropout=dropout
-        )
 
     def forward(
         self,
@@ -219,28 +254,39 @@ class SpectrumEmbedder(SpectrumTransformerEncoder):
         precursor_mz: torch.Tensor,
         subformulae: dict[str, torch.Tensor] | None = None,
         metadata: dict[str, torch.Tensor] | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Encode a batch of spectra into fixed-size embeddings.
 
         Parameters
         ----------
         mz : torch.Tensor
-            ``(B, L)`` float tensor of m/z values (zero-padded).
+            ``(B, L)`` float tensor of m/z values (potentially zero-padded).
         intensity : torch.Tensor
-            ``(B, L)`` float tensor of intensities (zero-padded).
+            ``(B, L)`` float tensor of intensities (potentially zero-padded).
         precursor_mz : torch.Tensor
             ``(B,)`` float tensor of precursor m/z values.
         subformulae : dict[str, torch.Tensor], optional
-            Dict with keys ``"form_vec"`` ``(B, L, ELEMENT_DIM)`` and
-            ``"parent_form_vec"`` ``(B, ELEMENT_DIM)`` for
-            subformula-augmented encoding.
+            Dict with keys ``"form_vec"``: ``(B, L, ELEMENT_DIM)`` and
+            ``"parent_form_vec"``: ``(B, ELEMENT_DIM)``.
+            Passed to :class:`SubformulaEncoder` if instantiated, and added to peak embeddings.
         metadata : dict[str, torch.Tensor], optional
-            Metadata tensors passed to :class:`MetadataEncoder`.
+            Dict of metadata tensors (see :class:`MetadataEncoder` for the
+            accepted keys). Passed to :class:`MetadataEncoder` if instantiated,
+            and its ``(B, d_model)`` output is added to the global/CLS token
+            (prepended at index 0, alongside the learned CLS embedding and the
+            precursor-m/z encoding) before the transformer.
 
         Returns
         -------
-        torch.Tensor
-            ``(B, d_out)`` float tensor of spectrum embeddings.
+        torch.Tensor or tuple[torch.Tensor, torch.Tensor]
+            The output depends on the ``pool`` mode set at construction:
+
+            - ``pool in {"attention", "cls"}`` — a ``(B, d_model)`` float tensor
+              of spectrum embeddings.
+            - ``pool is None`` — an ``(out, padding_mask)`` tuple, where ``out`` is a
+              ``(B, L + 1, d_model)`` tensor (global token at index 0 followed
+              by the peak tokens) and ``padding_mask`` is a ``(B, L + 1)`` bool
+              tensor with ``True`` marking padded positions.
         """
         spectra = torch.stack([mz, intensity], dim=2)
 
@@ -273,12 +319,11 @@ class SpectrumEmbedder(SpectrumTransformerEncoder):
             peaks, mask=None, src_key_padding_mask=src_key_padding_mask
         )
 
+        if self.pool_mode is None:
+            return out, src_key_padding_mask
         if self.pool_mode == "cls":
-            pooled = out[:, 0, :]
-        else:
-            pooled = self.aggregator(out, mask=src_key_padding_mask)
-
-        return self.proj(pooled)
+            return out[:, 0, :]
+        return self.aggregator(out, mask=src_key_padding_mask)
 
     def global_token_hook(
         self,
@@ -289,7 +334,8 @@ class SpectrumEmbedder(SpectrumTransformerEncoder):
         """Build the initial global token embedding for a batch of spectra.
 
         Sums a learned CLS embedding with the sinusoidal encoding of the
-        precursor m/z. Called internally by :meth:`forward`.
+        precursor m/z. Called internally by :meth:`forward` where the result
+        is prepended to the peak embeddings.
 
         Parameters
         ----------
@@ -318,20 +364,40 @@ class SpectrumEmbedder(SpectrumTransformerEncoder):
 class SubformulaEncoder(nn.Module):
     """Encode peak subformulae into ``d_model``-dimensional embeddings.
 
-    Follows the MIST approach: embeds each peak's subformula bag-of-atoms
+    Follows the MIST-CF approach: embeds each peak's subformula bag-of-atoms
     and its complement (``parent_formula - subformula``), concatenates both
-    embeddings, and projects to ``d_model``. The output is intended to be
-    added to :class:`PeakEncoder` output (additive fusion) inside
-    :class:`SpectrumEmbedder`.
+    embeddings, and linearly projects to ``d_model``. The output is additively combined with
+    :class:`PeakEncoder` output inside :class:`SpectrumEncoder` to make up final
+    peak embeddings.
+
+    The bag-of-atoms vectors consumed by :meth:`forward` (``form_vec`` and
+    ``parent_form_vec``) are built from formula strings by
+    :func:`~metabo_depthcharge.spec.subformulae.formula_to_dense` (single
+    formula) and
+    :func:`~metabo_depthcharge.spec.subformulae.assign_peak_subformulae`
+    (per-peak subformula assignment across a whole spectrum).
 
     Parameters
     ----------
     d_model : int
-        Output dimension; must match the transformer's ``d_model``.
+        Output dimension. Must match the transformer's ``d_model``.
     form_embedder : str, default "abs-sines"
-        MIST formula embedder type. One of ``"abs-sines"``, ``"fourier"``,
-        ``"fourier-sines"``, ``"rbf"``, ``"one-hot"``, ``"learnt"``,
-        ``"float"``.
+        Element-count featurizer used to embed each formula entry, named after
+        its MIST-CF implementation. One of:
+
+        - ``"abs-sines"`` — ``FourierFeaturizerAbsoluteSines``
+        - ``"fourier"`` — ``FourierFeaturizer``
+        - ``"fourier-sines"`` — ``FourierFeaturizerSines``
+        - ``"rbf"`` — ``RBFFeaturizer``
+        - ``"one-hot"`` — ``OneHotFeaturizer``
+        - ``"learnt"`` — ``LearnedFeaturizer``
+        - ``"float"`` — ``FloatFeaturizer``
+
+        These featurizers are vendored under
+        `metabo_depthcharge.mist_cf.nn_utils.form_embedder
+        <https://github.com/bittremieuxlab/metabo-depthcharge/blob/main/metabo_depthcharge/mist_cf/nn_utils/form_embedder.py>`_
+        from MIST-CF
+        (`samgoldman97/mist-cf <https://github.com/samgoldman97/mist-cf>`_).
     """
 
     def __init__(self, d_model: int, form_embedder: str = "abs-sines"):
@@ -350,8 +416,12 @@ class SubformulaEncoder(nn.Module):
         ----------
         form_vec : torch.Tensor
             ``(B, L, ELEMENT_DIM)`` int tensor — bag-of-atoms per peak.
+            See :func:`~metabo_depthcharge.spec.subformulae.formula_to_dense` for how to obtain this
+            from a formula string.
         parent_form_vec : torch.Tensor
             ``(B, ELEMENT_DIM)`` int tensor — parent molecular formula.
+            See :func:`~metabo_depthcharge.spec.subformulae.formula_to_dense` for how to obtain this
+            from a formula string.
 
         Returns
         -------

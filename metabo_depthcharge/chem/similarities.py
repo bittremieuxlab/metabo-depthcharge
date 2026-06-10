@@ -7,6 +7,11 @@ from tqdm.auto import tqdm
 
 
 class BinaryTanimoto:
+    """Binary (bitwise) Tanimoto similarity between fingerprints.
+
+    Instances are callable. The similarity is computed in :meth:`__call__`.
+    """
+
     def __init__(self) -> None:
         pass
 
@@ -19,7 +24,7 @@ class BinaryTanimoto:
         Parameters
         ----------
         fp1, fp2: np.ndarray
-            Binary fingerprints. Last axis is the bit dimension; any leading
+            Binary fingerprints. Last axis is the bit dimension. Any leading
             axes must be broadcast-compatible.
 
         Returns
@@ -41,6 +46,11 @@ class BinaryTanimoto:
 
 
 class CountTanimoto:
+    """Count (weighted) Tanimoto similarity between count fingerprints.
+
+    Instances are callable; the similarity is computed in :meth:`__call__`.
+    """
+
     def __init__(self) -> None:
         pass
 
@@ -53,7 +63,7 @@ class CountTanimoto:
         Parameters
         ----------
         fp1, fp2: np.ndarray
-            Count fingerprints. Last axis is the bit dimension; any leading
+            Count fingerprints. Last axis is the bit dimension. Any leading
             axes must be broadcast-compatible.
 
         Returns
@@ -73,6 +83,11 @@ class CountTanimoto:
 
 
 class CosineSimilarity:
+    """Cosine similarity between (sets of) vectors.
+
+    Instances are callable; the similarity is computed in :meth:`__call__`.
+    """
+
     def __init__(self) -> None:
         pass
 
@@ -85,7 +100,7 @@ class CosineSimilarity:
         Parameters
         ----------
         emb1, emb2: np.ndarray
-            Embeddings. Last axis is the embedding dimension; any leading
+            (Sets of) vectors. Last axis is the embedding dimension; any leading
             axes must be broadcast-compatible.
 
         Returns
@@ -142,15 +157,16 @@ class MCESDistance:
     n_jobs: int
         Number of parallel workers. -1 uses all CPUs (default: -1).
     solver_options: dict
-        Options for the underlying solver (default: dict(msg=0)).
+        Options for the underlying solver
+        Default: None resolves to ``dict(msg=0)``.
     solver: str
         Solver to use (default: "HiGHS").
     timeout: float or None
         Timeout in seconds for each pairwise MCES computation.
         If a computation exceeds this time, NaN is returned.
-        None means no timeout (default: None).
+        None means no timeout.
     progress : bool
-        Show a tqdm progress bar over pairs (default: False).
+        Show a tqdm progress bar over pairs.
     """
 
     def __init__(
@@ -265,7 +281,7 @@ class MCESDistance:
         -------
         float or np.ndarray
             Distance(s) with shape equal to the broadcasted shape
-            (scalar if both inputs are scalar/str). For an all-pairs
+            (scalar if both inputs are single str). For an all-pairs
             matrix, pass e.g. ``smiles1[:, None]`` and ``smiles2[None, :]``.
         """
         s1 = np.asarray(smiles1)
@@ -291,7 +307,20 @@ class MCESDistance:
         return result
 
     def pairwise(self, smiles: list[str] | np.ndarray) -> np.ndarray:
-        """Symmetric pairwise distance matrix, computing only the upper triangle."""
+        """Symmetric pairwise distance matrix, computing only the upper triangle.
+
+        Parameters
+        ----------
+        smiles : list[str] or np.ndarray
+            SMILES inputs; flattened to 1-D, giving ``n`` molecules.
+
+        Returns
+        -------
+        np.ndarray
+            ``(n, n)`` symmetric matrix of pairwise MCES distances. The
+            diagonal is zero (self-distances are not computed); only the
+            upper triangle is computed and mirrored to the lower triangle.
+        """
         arr = np.asarray(smiles).ravel()
         n = len(arr)
         pairs = [(str(arr[i]), str(arr[j])) for i in range(n) for j in range(i)]

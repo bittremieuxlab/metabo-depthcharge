@@ -15,7 +15,6 @@ dependencies = [
     "pandas>=2.0.0",
     "rdkit>=2023.9.0",
     "myopic_mces>=1.0.0,<2.0.0",
-    "h5py>=3.10.0",
     "datasets>=2.14.0",
     "pyteomics>=4.6",
     "biosynfoni>=1.0.0",
@@ -63,7 +62,6 @@ fixable = ["ALL"]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403"]
-"metabo_depthcharge/molecules/fingerprints.py" = ["B028", "B904", "UP038"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["metabo_depthcharge"]

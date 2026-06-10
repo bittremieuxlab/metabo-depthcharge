@@ -1,6 +1,7 @@
-"""Spec: MS/MS preprocessing primitives and (eventually) datasets."""
+"""Spec: MS/MS preprocessing primitives."""
 
 from metabo_depthcharge.spec.preprocessing import (
+    CollapseSteppedCE,
     DefaultSpectrumProcessor,
     Normalizer,
     PeakFilter,
@@ -11,10 +12,11 @@ from metabo_depthcharge.spec.preprocessing import (
 
 
 __all__ = [
-    "DefaultSpectrumProcessor",
+    "Spectrum",
     "Normalizer",
     "PeakFilter",
     "SequentialPreprocessor",
-    "Spectrum",
     "Trimmer",
+    "DefaultSpectrumProcessor",
+    "CollapseSteppedCE",
 ]

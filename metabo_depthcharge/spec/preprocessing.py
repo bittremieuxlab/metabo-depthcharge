@@ -14,6 +14,16 @@ class Spectrum:
     metadata : dict, optional
         Arbitrary per-spectrum key/value pairs (adduct, collision energy,
         instrument type, …), by default empty dict.
+
+    Example
+    -------
+    .. code-block:: python
+
+        spec = Spectrum(
+            mz=np.array([105.0, 150.0]),
+            intensity=np.array([0.5, 1.0]),
+        )
+        len(spec)  # 2
     """
 
     def __init__(self, mz=None, intensity=None, metadata=None):
@@ -36,17 +46,19 @@ class Spectrum:
         else:
             return 0
 
-    def plot(self, as_peaks=False, **kwargs):
+    def plot(self, as_peaks=True, **kwargs):
         """Plot a spectrum via matplotlib.
 
         Parameters
         ----------
         as_peaks : bool, optional
             Draw peaks as individual vertical lines instead of connecting
-            points, by default False.
+            points, by default True.
         """
         if as_peaks:
-            mz_plot = np.stack([self.mz - 1, self.mz, self.mz + 1]).T.reshape(-1)
+            mz_plot = np.stack([self.mz - 0.001, self.mz, self.mz + 0.001]).T.reshape(
+                -1
+            )
             int_plot = np.stack(
                 [
                     np.zeros_like(self.intensity),
@@ -68,7 +80,7 @@ class Spectrum:
         return "Spectrum([\n\tmz  = %s,\n\tint = %s\n])" % (mz_string, int_string)
 
     def torch(self):
-        """Return the spectrum as a dict of torch tensors."""
+        """Return the spectrum intensity and mz values as a dict of torch tensors."""
         import torch
 
         return {
@@ -78,7 +90,14 @@ class Spectrum:
 
 
 class Normalizer:
-    """Normalize spectrum intensity so that the maximum intensity equals 1."""
+    """Normalize spectrum intensity so that the maximum intensity equals 1.
+
+    Example
+    -------
+    .. code-block:: python
+
+        spectrum_processed = Normalizer()(spectrum)
+    """
 
     def __init__(self):
         pass
@@ -100,6 +119,12 @@ class Trimmer:
         Remove peaks with mz below this value, by default 0.
     max : int, optional
         Remove peaks with mz above this value, by default 2000.
+
+    Example
+    -------
+    .. code-block:: python
+
+        spectrum_processed = Trimmer(min=50, max=1000)(spectrum)
     """
 
     def __init__(self, min=0, max=2000):
@@ -123,6 +148,12 @@ class PeakFilter:
         Keep only the top-N most intense peaks, by default None (no limit).
     min_intensity : float, optional
         Discard peaks below this intensity, by default None (no limit).
+
+    Example
+    -------
+    .. code-block:: python
+
+        spectrum_processed = PeakFilter(max_number=128, min_intensity=0.01)(spectrum)
     """
 
     def __init__(self, max_number=None, min_intensity=None):
@@ -150,17 +181,83 @@ class PeakFilter:
         return s
 
 
-class SequentialPreprocessor:
-    """Chain multiple preprocessors into a single callable pipeline.
+class CollapseSteppedCE:
+    """Collapse suffixed CE key in ``"metadata"`` into a single ``collision_energy`` key.
+
+    Some MGFs have stepped collision energy as ``COLLISION_ENERGY_1``,
+    ``COLLISION_ENERGY_2``. Or ``NORMALIZED_COLLISION_ENERGY_N`` variants.
+
+    Parameters
+    ----------
+    source : {"normalized", "absolute"}, default "normalized"
+        Which family to collapse. ``"normalized"`` matches
+        ``normalized_collision_energy_N``; ``"absolute"`` matches
+        ``collision_energy_N``. Pyteomics lowercases MGF keys.
+
+    See Also
+    --------
+    ~metabo_depthcharge.spec.metadata_parsers.encode_collision_energy :
+        Downstream row-wise parser that turns the collapsed
+        ``collision_energy`` field into the ``float32`` value consumed by
+        ``MetadataEncoder``.
 
     Example
     -------
-    >>> preprocessor = SequentialPreprocessor(
-    ...     Trimmer(min=0, max=2000),
-    ...     PeakFilter(max_number=128),
-    ...     Normalizer(),
-    ... )
-    >>> processed = preprocessor(spectrum)
+    .. code-block:: python
+
+        spectrum.metadata = {"normalized_collision_energy_1": 20, "normalized_collision_energy_2": 40}
+        CollapseSteppedCE()(spectrum).metadata["collision_energy"]  # 30.0
+    """
+
+    def __init__(self, source: str = "normalized"):
+        if source not in ("normalized", "absolute"):
+            raise ValueError(
+                f"source must be 'normalized' or 'absolute', got {source!r}"
+            )
+        self._base = (
+            "normalized_collision_energy"
+            if source == "normalized"
+            else "collision_energy"
+        )
+
+    def __call__(self, spectrum):
+        vals = []
+        for k, v in spectrum.metadata.items():
+            kl = k.lower()
+            if kl != self._base and not kl.startswith(self._base + "_"):
+                continue
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if not np.isnan(f):
+                vals.append(f)
+        if vals:
+            spectrum.metadata["collision_energy"] = sum(vals) / len(vals)
+        return spectrum
+
+
+class SequentialPreprocessor:
+    """Chain multiple preprocessors into a single callable pipeline.
+
+    See Also
+    --------
+    ~metabo_depthcharge.spec.preprocessing.DefaultSpectrumProcessor :
+        Ready-made instance of this class (Trimmer + PeakFilter +
+        Normalizer). Plug it into the ``processor`` argument of
+        :class:`~metabo_depthcharge.datasets.SpectrumDataset` to bake
+        this preprocessing into a dataset.
+
+    Example
+    -------
+    .. code-block:: python
+
+        preprocessor = SequentialPreprocessor(
+            Trimmer(min=0, max=2000),
+            PeakFilter(max_number=128),
+            Normalizer(),
+        )
+        spectrum_processed = preprocessor(spectrum)
     """
 
     def __init__(self, *args):
@@ -172,6 +269,9 @@ class SequentialPreprocessor:
         return spectrum
 
 
+#: Default preprocessing pipeline. Trim to ``[0, 2000]`` m/z, cap to the 128
+#: most intense peaks, then normalize. A ready-to-use
+#: :class:`SequentialPreprocessor` instance; call it on a :class:`Spectrum`.
 DefaultSpectrumProcessor = SequentialPreprocessor(
     Trimmer(min=0, max=2000),
     PeakFilter(max_number=128),

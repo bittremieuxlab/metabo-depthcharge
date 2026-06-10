@@ -3,197 +3,163 @@
 import torch
 import torch.nn as nn
 
-from metabo_depthcharge.encoders.nn import AttnAggregator
+from metabo_depthcharge.encoders.nn import AttnAggregator, ResidualNetwork
 
 
 class MolMLP(nn.Module):
-    """Molecule embedder for a single fingerprint type.
+    """Molecule embedder for a single representation.
 
-    Projects a fingerprint vector to ``d_model`` via a linear layer followed
-    by ``n_layers - 1`` residual blocks (LayerNorm → Linear → GELU). A
-    normalisation step is applied at forward time depending on ``fp_type``:
-    count FPs are normalised via dividing by ``max_counts`` vectors; dense FPs are L2-normalised;
-    binary FPs are passed through unchanged.
-
-    Given input :math:`x \\in \\mathbb{R}^{d_\\text{fp}}`, first apply
-    type-specific normalisation:
-
-    .. math::
-
-        \\tilde{x} = \\text{norm}(x)
-
-    Where :math:`\\text{norm}(\\cdot)` depends on ``fp_type`` as described above.
-    then project and apply :math:`L - 1` residual blocks:
-
-    .. math::
-
-        h_0 = W_0\\,\\tilde{x} + b_0
-
-    .. math::
-
-        h_\\ell = h_{\\ell-1} + \\text{GELU}\\!\\left(
-            W_\\ell\\,\\text{LN}(h_{\\ell-1}) + b_\\ell
-        \\right), \\quad \\ell = 1,\\ldots,L-1
-
-    where :math:`L` is ``n_layers``.
+    Given an input :math:`\\boldsymbol{x} \\in \\mathbb{R}^{d_\\text{rep}}`, a
+    ``rep_type``-specific normalization is applied first: count
+    fingerprints are divided by ``max_counts``, dense fingerprints are
+    L2-normalized, and binary fingerprints are passed through unchanged. The
+    normalized vector is then embedded by a
+    :class:`ResidualNetwork` (see that class for the projection maths).
+    Note that the :class:`ResidualNetwork` used here has ``final_norm=False``,
+    so the output is not layer-normalized.
 
     Parameters
     ----------
-    fp_size : int
-        Input fingerprint dimensionality.
-    n_layers : int
-        Total depth. ``0`` → ``Identity`` (input passes through unchanged,
-        so ``fp_size`` must equal ``d_model``); ``1`` → single ``Linear``;
-        ``≥2`` → ``Linear`` + ``n_layers - 1`` residual blocks
-        (``LayerNorm → Linear → GELU``).
+    rep_size : int
+        Input representation dimensionality.
+    n_blocks : int
+        Number of residual blocks in the internal :class:`ResidualNetwork`.
+        ``0`` → projection only: a ``Linear`` to ``d_model``, or an exact pass-through when
+        ``rep_size == d_model``.
+        ``≥1`` adds that many residual blocks on top.
     d_model : int, default 512
         Output embedding dimension.
-    fp_type : str, default "binary"
+    rep_type : str, default "binary"
         One of ``"binary"``, ``"count"``, or ``"dense"``.
     max_counts : torch.Tensor, optional
-        ``(fp_size,)`` tensor of per-bit max counts used for count
-        normalisation when ``fp_type="count"``. Registered as a buffer
-        (not a learnable parameter). Obtain via
-        :meth:`~metabo_depthcharge.datasets.molecules.MoleculeDataset.get_molmlp`
+        ``(rep_size,)`` shape tensor with per-dim max counts used for count
+        normalization when ``rep_type="count"``. Obtain via
+        :meth:`metabo_depthcharge.datasets.MoleculeDataset.get_molmlp`
         to avoid manual derivation.
+    dropout : float, default 0.10
+        Dropout rate inside the :class:`ResidualNetwork` residual blocks.
     """
 
     def __init__(
         self,
-        fp_size: int,
-        n_layers: int,
+        rep_size: int,
+        n_blocks: int,
         d_model: int = 512,
-        fp_type: str = "binary",
+        rep_type: str = "binary",
         max_counts: torch.Tensor = None,
+        dropout: float = 0.10,
     ):
         super().__init__()
 
-        self.fp_type = fp_type
+        self.rep_type = rep_type
 
         if max_counts is not None:
             self.register_buffer("max_counts", max_counts)
         else:
             self.max_counts = None
 
-        if n_layers == 0:
-            self.init_layer = nn.Identity()
-            self.blocks = None
-        elif n_layers == 1:
-            self.init_layer = nn.Linear(fp_size, d_model)
-            self.blocks = None
-        else:
-            self.init_layer = nn.Linear(fp_size, d_model)
-            self.blocks = nn.ModuleList(
-                [
-                    nn.Sequential(
-                        nn.LayerNorm(d_model),
-                        nn.Linear(d_model, d_model),
-                        nn.GELU(),
-                    )
-                    for _ in range(n_layers - 1)
-                ]
-            )
+        self.proj = ResidualNetwork(
+            rep_size, d_model, n_blocks=n_blocks, dropout=dropout, final_norm=False
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Embed a batch of fingerprint vectors.
-
-        Applies type-specific normalisation before the MLP:
-        count FPs are divided by ``max_counts``; dense FPs are L2-normalised;
-        binary FPs are passed through unchanged.
+        """Embed a batch of fingerprint vectors as described in the class docstring.
 
         Parameters
         ----------
         x : torch.Tensor
-            ``(B, fp_size)`` float tensor of fingerprint values.
+            ``(B, rep_size)`` float tensor of fingerprint values.
 
         Returns
         -------
         torch.Tensor
             ``(B, d_model)`` float tensor of embeddings.
         """
-        if self.fp_type == "count" and self.max_counts is not None:
+        if self.rep_type == "count" and self.max_counts is not None:
             x = x / (self.max_counts + 1e-8)
-        elif self.fp_type == "dense":
+        elif self.rep_type == "dense":
             x = torch.nn.functional.normalize(x, p=2, dim=-1)
 
-        z = self.init_layer(x)
-        if self.blocks is not None:
-            for layer in self.blocks:
-                z = z + layer(z)
-        return z
+        return self.proj(x)
 
 
 class MultiMolMLP(nn.Module):
-    """Embeds multiple fingerprint types and aggregates via attention pooling.
+    """Embeds multiple representation types and aggregates via attention pooling.
 
-    Each fingerprint type gets its own :class:`MolMLP` projecting to
+    Each representation type gets its own :class:`MolMLP` projecting to
     ``d_model``. The per-type embeddings are stacked into
     ``(B, ..., N_fp, d_model)`` and aggregated with :class:`AttnAggregator`
     to produce ``(B, ..., d_model)``.
 
     Parameters
     ----------
-    fp_names : list[str]
-        Fingerprint names used as keys when indexing the input dict.
-    fp_sizes : list[int]
-        Input dimensionality for each fingerprint type.
-    n_layers : int
-        Number of layers passed to every :class:`MolMLP`.
+    rep_names : list[str]
+        Representation names used as keys when indexing the input dict.
+    rep_sizes : list[int]
+        Input dimensionality for each representation type.
+    n_blocks : int
+        Number of residual blocks passed to every :class:`MolMLP`.
     d_model : int, default 512
         Shared output embedding dimension.
-    fp_types : list[str], optional
-        ``fp_type`` for each fingerprint (defaults to ``"binary"`` for all
+    rep_types : list[str], optional
+        ``rep_type`` for each representation (defaults to ``"binary"`` for all
         if not provided).
     max_counts : dict[str, torch.Tensor], optional
-        Dict mapping ``fp_name`` → max-counts tensor for count FPs.
+        Dict mapping ``rep_name`` → max-counts tensor for count FPs.
+    dropout : float, default 0.10
+        Dropout rate passed to every :class:`MolMLP`.
     """
 
     def __init__(
         self,
-        fp_names: list[str],
-        fp_sizes: list[int],
-        n_layers: int,
+        rep_names: list[str],
+        rep_sizes: list[int],
+        n_blocks: int,
         d_model: int = 512,
-        fp_types: list[str] = None,
+        rep_types: list[str] = None,
         max_counts: dict[str, torch.Tensor] = None,
+        dropout: float = 0.10,
     ):
         super().__init__()
-        self.fp_names = fp_names
+        self.rep_names = rep_names
 
-        if fp_types is None:
-            fp_types = ["binary"] * len(fp_names)
+        if rep_types is None:
+            rep_types = ["binary"] * len(rep_names)
         if max_counts is None:
             max_counts = {}
 
         self.embedders = nn.ModuleDict(
             {
                 name: MolMLP(
-                    fp_size=size,
-                    n_layers=n_layers,
+                    rep_size=size,
+                    n_blocks=n_blocks,
                     d_model=d_model,
-                    fp_type=fpt,
+                    rep_type=fpt,
                     max_counts=max_counts.get(name),
+                    dropout=dropout,
                 )
-                for name, size, fpt in zip(fp_names, fp_sizes, fp_types, strict=False)
+                for name, size, fpt in zip(
+                    rep_names, rep_sizes, rep_types, strict=False
+                )
             }
         )
 
         self.aggregator = AttnAggregator(hidden_dim=d_model)
 
-    def forward(self, fps: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Embed and aggregate multiple fingerprints.
+    def forward(self, reps: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Embed and aggregate multiple representations.
 
         Parameters
         ----------
-        fps : dict[str, torch.Tensor]
-            Dict mapping ``fp_name`` → tensor of shape
-            ``(B, ..., fp_size_i)``. All tensors must share leading dims.
+        reps : dict[str, torch.Tensor]
+            Dict mapping ``rep_name`` → tensor of shape
+            ``(B, ..., rep_size_i)``. All tensors must share leading dims.
 
         Returns
         -------
         torch.Tensor
-            ``(B, ..., d_model)`` attention-aggregated embedding.
+            ``(B, ..., d_model)``. Attention-aggregated embedding.
         """
-        tokens = [self.embedders[name](fps[name]) for name in self.fp_names]
+        tokens = [self.embedders[name](reps[name]) for name in self.rep_names]
         stacked = torch.stack(tokens, dim=-2)  # (B, ..., N_fp, d_model)
         return self.aggregator(stacked)  # (B, ..., d_model)

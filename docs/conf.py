@@ -39,6 +39,8 @@ autodoc_default_options = {
     "show-inheritance": True,
     "undoc-members": True,
     "member-order": "bysource",
+    "special-members": "__call__",
+    "exclude-members": "T_destination,call_super_init,dump_patches,training,rep_size",
 }
 autodoc_member_order = "bysource"
 autosummary_member_order = "bysource"

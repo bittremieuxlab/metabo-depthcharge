@@ -6,7 +6,7 @@ import torch
 
 from metabo_depthcharge.chem import Molecule
 from metabo_depthcharge.chem.molecule import PROPERTIES
-from metabo_depthcharge.datasets.molecules import _FP_INFO, MoleculeDataset
+from metabo_depthcharge.datasets.molecules import _REP_INFO, MoleculeDataset
 
 
 ASPIRIN = "CC(=O)Oc1ccccc1C(=O)O"
@@ -250,7 +250,7 @@ def test_collate_count_fingerprint_carries_values(tiny_tsv):
     assert (batch["morgan_count"] > 1).any()
 
 
-def test_collate_passes_through_non_fp_columns(tiny_tsv):
+def test_collate_passes_through_non_rep_columns(tiny_tsv):
     ds = MoleculeDataset.from_csv(
         tiny_tsv,
         sep="\t",
@@ -263,16 +263,16 @@ def test_collate_passes_through_non_fp_columns(tiny_tsv):
     assert batch["formula"] == ["C9H8O4", "C8H10N4O2"]
 
 
-# --- _FP_INFO registry smoke -------------------------------------------
+# --- _REP_INFO registry smoke -------------------------------------------
 
 
-@pytest.mark.parametrize("name", list(_FP_INFO))
-def test_fp_info_build_returns_extractor_with_matching_size(name):
-    spec = _FP_INFO[name]
+@pytest.mark.parametrize("name", list(_REP_INFO))
+def test_rep_info_build_returns_extractor_with_matching_size(name):
+    spec = _REP_INFO[name]
     if spec.get("neural"):
         pytest.skip("neural extractor: skip to avoid model download")
     extractor = spec["build"]()
-    assert extractor.fp_size == spec["size"]
+    assert extractor.rep_size == spec["size"]
 
 
 # --- get_molmlp factory -------------------------------------
@@ -284,16 +284,16 @@ def test_get_molmlp_single_binary_returns_mol_embedder(tiny_tsv):
     ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
         {"morgan": {}}
     )
-    enc = ds.get_molmlp(["morgan"], n_layers=2, d_model=32)
+    enc = ds.get_molmlp(["morgan"], n_blocks=2, d_model=32)
     assert isinstance(enc, MolMLP)
-    assert enc.fp_type == "binary"
+    assert enc.rep_type == "binary"
 
 
 def test_get_molmlp_single_count_has_max_counts(tiny_tsv):
     ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
         {"morgan_count": {}}
     )
-    enc = ds.get_molmlp(["morgan_count"], n_layers=2, d_model=32)
+    enc = ds.get_molmlp(["morgan_count"], n_blocks=2, d_model=32)
     assert enc.max_counts is not None
     assert enc.max_counts.shape == (4096,)
 
@@ -303,7 +303,7 @@ def test_get_molmlp_count_no_max_counts_when_disabled(tiny_tsv):
         {"morgan_count": {}}
     )
     enc = ds.get_molmlp(
-        ["morgan_count"], n_layers=2, d_model=32, compute_max_counts=False
+        ["morgan_count"], n_blocks=2, d_model=32, compute_max_counts=False
     )
     assert enc.max_counts is None
 
@@ -314,16 +314,16 @@ def test_get_molmlp_multi_returns_multi_mol_embedder(tiny_tsv):
     ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
         {"morgan": {}, "maccs": {}}
     )
-    enc = ds.get_molmlp(["morgan", "maccs"], n_layers=2, d_model=32)
+    enc = ds.get_molmlp(["morgan", "maccs"], n_blocks=2, d_model=32)
     assert isinstance(enc, MultiMolMLP)
-    assert enc.fp_names == ["morgan", "maccs"]
+    assert enc.rep_names == ["morgan", "maccs"]
 
 
 def test_get_molmlp_forward_pass(tiny_tsv):
     ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t").add_representations(
         {"morgan": {}}
     )
-    enc = ds.get_molmlp(["morgan"], n_layers=2, d_model=32)
+    enc = ds.get_molmlp(["morgan"], n_blocks=2, d_model=32)
     batch = ds.collate([ds[i] for i in range(len(ds))])
     out = enc(batch["morgan"])
     assert out.shape == (len(ds), 32)
@@ -332,10 +332,10 @@ def test_get_molmlp_forward_pass(tiny_tsv):
 def test_get_molmlp_raises_on_missing_column(tiny_tsv):
     ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t")
     with pytest.raises(ValueError, match="not found"):
-        ds.get_molmlp(["morgan"], n_layers=2, d_model=32)
+        ds.get_molmlp(["morgan"], n_blocks=2, d_model=32)
 
 
 def test_get_molmlp_raises_on_unknown_fp(tiny_tsv):
     ds = MoleculeDataset.from_csv(tiny_tsv, sep="\t")
     with pytest.raises(ValueError, match="Unknown representation name"):
-        ds.get_molmlp(["not_a_fp"], n_layers=2, d_model=32)
+        ds.get_molmlp(["not_a_fp"], n_blocks=2, d_model=32)

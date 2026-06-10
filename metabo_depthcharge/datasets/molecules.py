@@ -21,33 +21,38 @@ from metabo_depthcharge.chem.representations import (
     MoleculeToMorgan,
     MoleculeToRdkit,
 )
-from metabo_depthcharge.datasets._common import hf_silent, hf_tempcache
+from metabo_depthcharge.datasets._common import (
+    hf_cache_file,
+    hf_persist,
+    hf_silent,
+    hf_tempcache,
+)
 from metabo_depthcharge.encoders.molecules import MolMLP, MultiMolMLP
 
 
-_FP_INFO: dict[str, dict] = {
+_REP_INFO: dict[str, dict] = {
     "morgan": {
         "kind": "binary",
         "size": 4096,
-        "build": lambda **kw: MoleculeToMorgan(**{"fp_size": 4096, **kw}),
+        "build": lambda **kw: MoleculeToMorgan(**{"rep_size": 4096, **kw}),
     },
     "morgan_count": {
         "kind": "count",
         "size": 4096,
         "build": lambda **kw: MoleculeToMorgan(
-            **{"fp_size": 4096, "counts": True, **kw}
+            **{"rep_size": 4096, "counts": True, **kw}
         ),
     },
     "rdkit": {
         "kind": "binary",
         "size": 4096,
-        "build": lambda **kw: MoleculeToRdkit(**{"fp_size": 4096, **kw}),
+        "build": lambda **kw: MoleculeToRdkit(**{"rep_size": 4096, **kw}),
     },
     "rdkit_count": {
         "kind": "count",
         "size": 4096,
         "build": lambda **kw: MoleculeToRdkit(
-            **{"fp_size": 4096, "counts": True, **kw}
+            **{"rep_size": 4096, "counts": True, **kw}
         ),
     },
     "maccs": {
@@ -63,7 +68,7 @@ _FP_INFO: dict[str, dict] = {
     "map4": {
         "kind": "binary",
         "size": 4096,
-        "build": lambda **kw: MoleculeToMAP4(**{"fp_size": 4096, **kw}),
+        "build": lambda **kw: MoleculeToMAP4(**{"rep_size": 4096, **kw}),
     },
     "chemberta": {
         "kind": "dense",
@@ -204,9 +209,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
                     cache_dir=cache_dir,
                 )
 
-            if save_to is not None:
-                ds.save_to_disk(str(save_to))
-                ds = Dataset.load_from_disk(str(save_to))
+            ds = hf_persist(ds, save_to)
         return cls._create(ds)
 
     @classmethod
@@ -258,7 +261,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
         ----------
         path : str or PathLike
             Directory previously written by :meth:`save_to`,
-            :meth:`from_list` / :meth:`from_mgf` with ``save_to=...``.
+            :meth:`from_csv` / :meth:`from_list` with ``save_to=...``.
 
         Returns
         -------
@@ -312,9 +315,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
             batch_size=batch_size,
             num_proc=nproc,
             keep_in_memory=in_memory,
-            cache_file_name=None
-            if (in_memory or cache_dir is None)
-            else os.path.join(cache_dir, uuid.uuid4().hex + ".arrow"),
+            cache_file_name=hf_cache_file(cache_dir, in_memory),
             desc="Computing properties",
         )
         before = len(ds)
@@ -322,9 +323,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
             lambda r: all(r[p] is not None for p in properties),
             num_proc=nproc,
             keep_in_memory=in_memory,
-            cache_file_name=None
-            if (in_memory or cache_dir is None)
-            else os.path.join(cache_dir, uuid.uuid4().hex + ".arrow"),
+            cache_file_name=hf_cache_file(cache_dir, in_memory),
         )
         if (dropped := before - len(ds)) > 0:
             tqdm.write(
@@ -382,9 +381,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
                 batch_size=batch_size,
                 num_proc=nproc,
                 keep_in_memory=in_memory,
-                cache_file_name=None
-                if (in_memory or cache_dir is None)
-                else os.path.join(cache_dir, uuid.uuid4().hex + ".arrow"),
+                cache_file_name=hf_cache_file(cache_dir, in_memory),
                 desc="Standardizing",
             )
             before = len(ds)
@@ -392,9 +389,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
                 lambda r: r["smiles"] is not None,
                 num_proc=nproc,
                 keep_in_memory=in_memory,
-                cache_file_name=None
-                if (in_memory or cache_dir is None)
-                else os.path.join(cache_dir, uuid.uuid4().hex + ".arrow"),
+                cache_file_name=hf_cache_file(cache_dir, in_memory),
             )
             if (dropped := before - len(ds)) > 0:
                 tqdm.write(
@@ -414,9 +409,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
                     cache_dir=cache_dir,
                 )
 
-            if save_to is not None:
-                ds.save_to_disk(str(save_to))
-                ds = Dataset.load_from_disk(str(save_to))
+            ds = hf_persist(ds, save_to)
         return type(self)._create(ds)
 
     def add_representations(
@@ -438,7 +431,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
             Valid names: ``"morgan"``, ``"morgan_count"``, ``"rdkit"``,
             ``"rdkit_count"``, ``"maccs"``, ``"biosynfoni"``, ``"map4"``,
             ``"chemberta"``, ``"molformer"``.
-            See :mod:`~metabo_depthcharge.chem.representations` for builder
+            See the :doc:`chem module </api/chem>` for builder
             keyword arguments.
             E.g. ``{"morgan": None, "chemberta": {"device": "cuda"}}``.
         batch_size : int, default 512
@@ -468,9 +461,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
                     keep_in_memory=in_memory,
                     cache_dir=cache_dir,
                 )
-            if save_to is not None:
-                ds.save_to_disk(str(save_to))
-                ds = Dataset.load_from_disk(str(save_to))
+            ds = hf_persist(ds, save_to)
         return type(self)._create(ds)
 
     @staticmethod
@@ -489,21 +480,21 @@ class MoleculeDataset(torch.utils.data.Dataset):
         Helper function for add_representation().
         See add_representation() for parameter descriptions.
         """
-        if name not in _FP_INFO:
+        if name not in _REP_INFO:
             raise ValueError(
                 f"Unknown representation name {name!r}; "
-                f"must be one of {sorted(_FP_INFO)}"
+                f"must be one of {sorted(_REP_INFO)}"
             )
-        repr_info = _FP_INFO[name]
+        repr_info = _REP_INFO[name]
         kind = repr_info["kind"]
-        fp_size = repr_info["size"]
+        rep_size = repr_info["size"]
         build_kwargs = build_kwargs or {}
 
         nproc = None if repr_info.get("neural") or num_proc <= 1 else num_proc
         rep_cache = [None]
 
         if kind == "dense":
-            new_cols = {name: Sequence(Value("float32"), length=fp_size)}
+            new_cols = {name: Sequence(Value("float32"), length=rep_size)}
         elif kind == "binary":
             new_cols = {name: Sequence(Value("int16"))}
         else:  # count
@@ -514,7 +505,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
 
         def map_batched(batch):
             if rep_cache[0] is None:
-                rep_cache[0] = _FP_INFO[name]["build"](**build_kwargs)
+                rep_cache[0] = _REP_INFO[name]["build"](**build_kwargs)
             try:
                 mols = [Molecule(s) for s in batch["smiles"]]
             except Exception as exc:
@@ -547,9 +538,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
             num_proc=nproc,
             features=Features({**ds.features, **new_cols}),
             keep_in_memory=keep_in_memory,
-            cache_file_name=None
-            if (keep_in_memory or cache_dir is None)
-            else os.path.join(cache_dir, uuid.uuid4().hex + ".arrow"),
+            cache_file_name=hf_cache_file(cache_dir, keep_in_memory),
             new_fingerprint=uuid.uuid4().hex,
             desc=f"Computing {name}",
         )
@@ -602,14 +591,14 @@ class MoleculeDataset(torch.utils.data.Dataset):
     @staticmethod
     def _densify(
         indices: list,
-        fp_size: int,
+        rep_size: int,
         values: list | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> torch.Tensor:
-        """Densify sparse fingerprint rows into a ``(B, fp_size)`` tensor.
+        """Densify sparse fingerprint rows into a ``(B, rep_size)`` tensor.
         Used by the collater to construct batches of sparse representations.
         """
-        out = torch.zeros((len(indices), fp_size), dtype=dtype)
+        out = torch.zeros((len(indices), rep_size), dtype=dtype)
         for b, idx in enumerate(indices):
             idx = idx.long()
             if values is None:
@@ -625,7 +614,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
         """
         out = {"smiles": [r["smiles"] for r in batch]}
         skip = {"smiles"}
-        for name, spec in _FP_INFO.items():
+        for name, spec in _REP_INFO.items():
             if name not in batch[0]:
                 continue
             kind, size = spec["kind"], spec["size"]
@@ -653,8 +642,8 @@ class MoleculeDataset(torch.utils.data.Dataset):
 
     def get_molmlp(
         self,
-        fp_names: list[str],
-        n_layers: int,
+        rep_names: list[str],
+        n_blocks: int,
         d_model: int = 512,
         *,
         compute_max_counts: bool = True,
@@ -665,12 +654,15 @@ class MoleculeDataset(torch.utils.data.Dataset):
 
         Parameters
         ----------
-        fp_names : list[str]
-            One or more fingerprint column names (keys of :data:`_FP_INFO`).
+        rep_names : list[str]
+            One or more representation column names previously added via
+            :meth:`add_representations`. Valid names: ``"morgan"``,
+            ``"morgan_count"``, ``"rdkit"``, ``"rdkit_count"``, ``"maccs"``,
+            ``"biosynfoni"``, ``"map4"``, ``"chemberta"``, ``"molformer"``.
             A single-element list returns :class:`~metabo_depthcharge.encoders.molecules.MolMLP`;
             two or more return :class:`~metabo_depthcharge.encoders.molecules.MultiMolMLP`.
-        n_layers : int
-            Depth passed to the underlying
+        n_blocks : int
+            Number of residual blocks passed to the underlying
             :class:`~metabo_depthcharge.encoders.molecules.MolMLP`.
         d_model : int, default 512
             Output embedding dimension.
@@ -681,12 +673,12 @@ class MoleculeDataset(torch.utils.data.Dataset):
 
         Returns
         -------
-        MolMLP or MultiMolMLP
+        :class:`~metabo_depthcharge.encoders.molecules.MolMLP` or :class:`~metabo_depthcharge.encoders.molecules.MultiMolMLP`
         """
-        for name in fp_names:
-            if name not in _FP_INFO:
+        for name in rep_names:
+            if name not in _REP_INFO:
                 raise ValueError(
-                    f"Unknown representation name {name!r}; must be one of {sorted(_FP_INFO)}"
+                    f"Unknown representation name {name!r}; must be one of {sorted(_REP_INFO)}"
                 )
             if name not in self.ds.column_names:
                 raise ValueError(
@@ -694,38 +686,38 @@ class MoleculeDataset(torch.utils.data.Dataset):
                     "call add_representations() first."
                 )
 
-        fp_types = [_FP_INFO[n]["kind"] for n in fp_names]
-        fp_sizes = [_FP_INFO[n]["size"] for n in fp_names]
+        rep_types = [_REP_INFO[n]["kind"] for n in rep_names]
+        rep_sizes = [_REP_INFO[n]["size"] for n in rep_names]
 
         max_counts: dict[str, torch.Tensor] = {}
         if compute_max_counts:
-            for name, kind, size in zip(fp_names, fp_types, fp_sizes, strict=False):
+            for name, kind, size in zip(rep_names, rep_types, rep_sizes, strict=False):
                 if kind == "count":
                     max_counts[name] = self._max_counts_from_sparse(self.ds, name, size)
 
-        if len(fp_names) == 1:
+        if len(rep_names) == 1:
             return MolMLP(
-                fp_size=fp_sizes[0],
-                n_layers=n_layers,
+                rep_size=rep_sizes[0],
+                n_blocks=n_blocks,
                 d_model=d_model,
-                fp_type=fp_types[0],
-                max_counts=max_counts.get(fp_names[0]),
+                rep_type=rep_types[0],
+                max_counts=max_counts.get(rep_names[0]),
             )
 
         return MultiMolMLP(
-            fp_names=fp_names,
-            fp_sizes=fp_sizes,
-            n_layers=n_layers,
+            rep_names=rep_names,
+            rep_sizes=rep_sizes,
+            n_blocks=n_blocks,
             d_model=d_model,
-            fp_types=fp_types,
+            rep_types=rep_types,
             max_counts=max_counts or None,
         )
 
     @staticmethod
-    def _max_counts_from_sparse(ds: Dataset, name: str, fp_size: int) -> torch.Tensor:
+    def _max_counts_from_sparse(ds: Dataset, name: str, rep_size: int) -> torch.Tensor:
         """Compute per-bit max count across all rows of a sparse count column.
 
-        Used in get_mol_embedder() to normalise count fingerprints for MolMLP.
+        Used in get_molmlp() to normalise count fingerprints for MolMLP.
         """
         flat_idx = (
             ds.data.column(name)
@@ -739,6 +731,6 @@ class MoleculeDataset(torch.utils.data.Dataset):
             .values.to_numpy(zero_copy_only=False)
             .astype(np.float32)
         )
-        max_c = np.zeros(fp_size, dtype=np.float32)
+        max_c = np.zeros(rep_size, dtype=np.float32)
         np.maximum.at(max_c, flat_idx, flat_val)
         return torch.from_numpy(max_c)

@@ -1,5 +1,6 @@
 """Numerical molecular representation generator classes."""
 
+import functools
 from collections.abc import Iterable
 
 import numpy as np
@@ -14,6 +15,7 @@ from metabo_depthcharge.chem.molecule import Molecule
 
 
 def _batched(fn):
+    @functools.wraps(fn)
     def wrapper(self, mol):
         if isinstance(mol, Molecule):
             return fn(self, mol)
@@ -27,28 +29,36 @@ class MoleculeToMorgan:
 
     Parameters
     ----------
-    fp_size : int, default 4096
+    rep_size : int, default 4096
         Hashed fingerprint length.
     radius : int, default 2
         Circular substructure radius.
     counts : bool, default False
-        Return integer counts; otherwise binary 0/1.
-
-    Notes
-    -----
-    Callable. A single :class:`Molecule` returns ``(fp_size,)``; an
-    iterable of molecules returns ``(N, fp_size)``.
+        Return integer counts. Otherwise binary 0/1.
     """
 
-    def __init__(self, fp_size: int = 4096, radius: int = 2, counts: bool = False):
+    def __init__(self, rep_size: int = 4096, radius: int = 2, counts: bool = False):
         self.fpgen = Chem.rdFingerprintGenerator.GetMorganGenerator(
-            radius=radius, fpSize=fp_size
+            radius=radius, fpSize=rep_size
         )
         self.counts = counts
-        self.fp_size = fp_size
+        self.rep_size = rep_size
 
     @_batched
-    def __call__(self, mol: Molecule) -> np.ndarray:
+    def __call__(self, mol: Molecule | Iterable[Molecule]) -> np.ndarray:
+        """Compute the Morgan fingerprint.
+
+        Parameters
+        ----------
+        mol : Molecule or iterable of Molecule
+            A single molecule or an iterable of molecules.
+
+        Returns
+        -------
+        np.ndarray
+            ``(rep_size,)`` for a single molecule, or ``(N, rep_size)`` for an
+            iterable of ``N`` molecules.
+        """
         if self.counts:
             return self.fpgen.GetCountFingerprintAsNumPy(mol.mol)
         return self.fpgen.GetFingerprintAsNumPy(mol.mol)
@@ -59,24 +69,32 @@ class MoleculeToRdkit:
 
     Parameters
     ----------
-    fp_size : int, default 4096
+    rep_size : int, default 4096
         Hashed fingerprint length.
     counts : bool, default False
-        Return integer counts; otherwise binary 0/1.
-
-    Notes
-    -----
-    Callable. A single :class:`Molecule` returns ``(fp_size,)``; an
-    iterable of molecules returns ``(N, fp_size)``.
+        Return integer counts. Otherwise binary 0/1.
     """
 
-    def __init__(self, fp_size: int = 4096, counts: bool = False):
-        self.fpgen = Chem.rdFingerprintGenerator.GetRDKitFPGenerator(fpSize=fp_size)
+    def __init__(self, rep_size: int = 4096, counts: bool = False):
+        self.fpgen = Chem.rdFingerprintGenerator.GetRDKitFPGenerator(fpSize=rep_size)
         self.counts = counts
-        self.fp_size = fp_size
+        self.rep_size = rep_size
 
     @_batched
-    def __call__(self, mol: Molecule) -> np.ndarray:
+    def __call__(self, mol: Molecule | Iterable[Molecule]) -> np.ndarray:
+        """Compute the RDKit topological fingerprint.
+
+        Parameters
+        ----------
+        mol : Molecule or iterable of Molecule
+            A single molecule or an iterable of molecules.
+
+        Returns
+        -------
+        np.ndarray
+            ``(rep_size,)`` for a single molecule, or ``(N, rep_size)`` for an
+            iterable of ``N`` molecules.
+        """
         if self.counts:
             return self.fpgen.GetCountFingerprintAsNumPy(mol.mol)
         return self.fpgen.GetFingerprintAsNumPy(mol.mol)
@@ -85,62 +103,92 @@ class MoleculeToRdkit:
 class MoleculeToMACCS:
     """MACCS structural keys (167 binary bits).
 
-    Notes
-    -----
-    Callable. A single :class:`Molecule` returns ``(167,)``; an iterable
-    of molecules returns ``(N, 167)``.
+    Takes no constructor arguments.
     """
 
-    fp_size = 167
+    rep_size = 167
 
     @_batched
-    def __call__(self, mol: Molecule) -> np.ndarray:
-        fp = AllChem.GetMACCSKeysFingerprint(mol.mol)
+    def __call__(self, mol: Molecule | Iterable[Molecule]) -> np.ndarray:
+        """Compute the 167-bit MACCS key fingerprint.
+
+        Parameters
+        ----------
+        mol : Molecule or iterable of Molecule
+            A single molecule or an iterable of molecules.
+
+        Returns
+        -------
+        np.ndarray
+            ``(167,)`` for a single molecule, or ``(N, 167)`` for an iterable
+            of ``N`` molecules.
+        """
+        rep = AllChem.GetMACCSKeysFingerprint(mol.mol)
         out = np.zeros((0,), dtype=np.int32)
-        DataStructs.ConvertToNumpyArray(fp, out)
+        DataStructs.ConvertToNumpyArray(rep, out)
         return out
 
 
 class MoleculeToBiosynfoni:
     """Biosynfoni biochemically-informed fingerprint (39 count dims).
 
-    Notes
-    -----
-    Callable. A single :class:`Molecule` returns ``(39,)``; an iterable
-    of molecules returns ``(N, 39)``.
+    Takes no constructor arguments.
     """
 
-    fp_size = 39
+    rep_size = 39
 
     @_batched
-    def __call__(self, mol: Molecule) -> np.ndarray:
+    def __call__(self, mol: Molecule | Iterable[Molecule]) -> np.ndarray:
+        """Compute the Biosynfoni fingerprint.
+
+        Parameters
+        ----------
+        mol : Molecule or iterable of Molecule
+            A single molecule or an iterable of molecules.
+
+        Returns
+        -------
+        np.ndarray
+            ``(39,)`` for a single molecule, or ``(N, 39)`` for an iterable of
+            ``N`` molecules.
+        """
         return np.array(Biosynfoni(mol.mol).fingerprint)
 
 
 class MoleculeToMAP4:
     """MAP4 MinHashed atom-pair fingerprint.
 
+    Computed via the `map4 <https://pypi.org/project/map4/>`_ package.
+
     Parameters
     ----------
-    fp_size : int, default 4096
+    rep_size : int, default 4096
         MinHash dimensionality.
     radius : int, default 2
         Atom-pair shingle radius.
-
-    Notes
-    -----
-    Callable. A single :class:`Molecule` returns ``(fp_size,)``; an
-    iterable of molecules returns ``(N, fp_size)``.
     """
 
-    def __init__(self, fp_size: int = 4096, radius: int = 2):
+    def __init__(self, rep_size: int = 4096, radius: int = 2):
         self.map_calc = MAP4(
-            dimensions=fp_size, radius=radius, include_duplicated_shingles=False
+            dimensions=rep_size, radius=radius, include_duplicated_shingles=False
         )
-        self.fp_size = fp_size
+        self.rep_size = rep_size
 
     @_batched
-    def __call__(self, mol: Molecule) -> np.ndarray:
+    def __call__(self, mol: Molecule | Iterable[Molecule]) -> np.ndarray:
+        """Compute the MAP4 fingerprint.
+
+        Parameters
+        ----------
+        mol : Molecule or iterable of Molecule
+            A single molecule or an iterable of molecules.
+
+        Returns
+        -------
+        np.ndarray
+            ``(rep_size,)`` for a single molecule, or ``(N, rep_size)`` for an
+            iterable of ``N`` molecules.
+        """
         return self.map_calc.calculate(mol.mol)
 
 
@@ -172,7 +220,7 @@ class _HFEmbedder:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, **kw)
         self.model = AutoModel.from_pretrained(model_name, **kw, **model_kw)
         self.model.to(self.torch_device).eval()
-        self.fp_size = self.model.config.hidden_size
+        self.rep_size = self.model.config.hidden_size
 
     def _embed(self, smiles_list: list[str]) -> np.ndarray:
         inputs = self.tokenizer(
@@ -199,6 +247,19 @@ class _HFEmbedder:
         return emb.astype(np.float32)
 
     def __call__(self, mol: Molecule | Iterable[Molecule]) -> np.ndarray:
+        """Embed molecule SMILES into a fixed-size vector.
+
+        Parameters
+        ----------
+        mol : Molecule or iterable of Molecule
+            A single molecule or an iterable of molecules.
+
+        Returns
+        -------
+        np.ndarray
+            ``(rep_size,)`` ``float32`` for a single molecule, or
+            ``(N, rep_size)`` for an iterable of ``N`` molecules.
+        """
         if isinstance(mol, Molecule):
             return self._embed([mol.canonical_smiles])[0]
         return self._embed([m.canonical_smiles for m in mol])
@@ -207,20 +268,19 @@ class _HFEmbedder:
 class MoleculeToMolFormer(_HFEmbedder):
     """IBM MolFormer pretrained embeddings.
 
+    Uses ``outputs.pooler_output`` if available (the IBM model exposes one),
+    else the CLS token.
+
     Parameters
     ----------
     model_name : str, default ``"ibm-research/MoLFormer-XL-both-10pct"``
-        HuggingFace model id. Requires ``trust_remote_code=True`` for
-        IBM's custom linear-attention module.
+        HuggingFace model id of a MolFormer checkpoint. Requires
+        ``trust_remote_code=True`` for the custom linear-attention module.
+        The default is the IBM XL model trained on 10% of ZINC + PubChem
+        (``"ibm/MoLFormer-XL-both-10pct"``);
+        Another possible checkpoint is e.g., ``"DeepChem/MoLFormer-c3-1.1B"``.
     device : str, default ``"cpu"``
         ``"cpu"``, ``"cuda"``, or ``"cuda:N"``.
-
-    Notes
-    -----
-    Callable. A single :class:`Molecule` returns ``(fp_size,)``; an
-    iterable of molecules returns ``(N, fp_size)``. Uses
-    ``outputs.pooler_output`` if available (the IBM model exposes one),
-    else CLS.
     """
 
     def __init__(
@@ -232,22 +292,26 @@ class MoleculeToMolFormer(_HFEmbedder):
             model_name, device, trust_remote_code=True, pooling="pooler_or_cls"
         )
 
+    # Re-expose the inherited call operator so it is documented on this class.
+    __call__ = _HFEmbedder.__call__
+
 
 class MoleculeToChemBERTa(_HFEmbedder):
     """ChemBERTa pretrained embeddings.
 
+    Always uses the CLS token from ``last_hidden_state`` (ignores any pooler
+    the model exposes).
+
     Parameters
     ----------
     model_name : str, default ``"Derify/ChemBERTa_augmented_pubchem_13m"``
-        HuggingFace model id.
+        Any HuggingFace Hub id for a RoBERTa/BERT-style SMILES encoder
+        works, since only the CLS token of ``last_hidden_state`` is pooled.
+        Other public checkpoints include ``"DeepChem/ChemBERTa-77M-MLM"``,
+        ``"DeepChem/ChemBERTa-77M-MTR"``, and
+        ``"seyonec/ChemBERTa-zinc-base-v1"``.
     device : str, default ``"cpu"``
         ``"cpu"``, ``"cuda"``, or ``"cuda:N"``.
-
-    Notes
-    -----
-    Callable. A single :class:`Molecule` returns ``(fp_size,)``; an
-    iterable of molecules returns ``(N, fp_size)``. Always uses CLS
-    from ``last_hidden_state`` (ignores any pooler the model exposes).
     """
 
     def __init__(
@@ -256,3 +320,6 @@ class MoleculeToChemBERTa(_HFEmbedder):
         device: str = "cpu",
     ):
         super().__init__(model_name, device, trust_remote_code=False, pooling="cls")
+
+    # Re-expose the inherited call operator so it is documented on this class.
+    __call__ = _HFEmbedder.__call__

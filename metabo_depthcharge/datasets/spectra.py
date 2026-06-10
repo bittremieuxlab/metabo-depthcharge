@@ -1,7 +1,5 @@
 """Spectrum dataset creation and dataloading utilities"""
 
-import os
-import uuid
 import warnings
 from collections.abc import Callable, Iterable
 from os import PathLike
@@ -14,7 +12,13 @@ from pyteomics.mgf import read
 from torch.nn.utils.rnn import pad_sequence
 from tqdm.auto import tqdm
 
-from metabo_depthcharge.datasets._common import hf_silent, hf_tempcache, infer_value
+from metabo_depthcharge.datasets._common import (
+    hf_cache_file,
+    hf_persist,
+    hf_silent,
+    hf_tempcache,
+    infer_value,
+)
 from metabo_depthcharge.spec.adducts import encode_adduct
 from metabo_depthcharge.spec.metadata_parsers import METADATA_FIELDS, METADATA_PARSERS
 from metabo_depthcharge.spec.preprocessing import Spectrum
@@ -160,7 +164,7 @@ class SpectrumDataset(torch.utils.data.Dataset):
             Build-time preprocessor baked into the Arrow output.
             ``None`` (default) skips preprocessing.
             Recommended for deterministic expensive processing not to be repeated at each iteration.
-            See :mod:`metabo_depthcharge.spec` for example preprocessors.
+            See the :doc:`spec module </api/spec>` for example preprocessors.
         transform : Callable[[Spectrum], Spectrum], optional
             Same as `processor`, but applied at iteration time.
             Recommended for lightweight or stochastic processing.
@@ -222,7 +226,7 @@ class SpectrumDataset(torch.utils.data.Dataset):
             Build-time preprocessor baked into the Arrow output.
             ``None`` (default) skips preprocessing.
             Recommended for deterministic expensive processing not to be repeated at each iteration.
-            See :mod:\metabo_depthcharge.spec for example preprocessors.
+            See the :doc:`spec module </api/spec>` for example preprocessors.
         transform : Callable[[Spectrum], Spectrum], optional
             Same as `processor`, but applied at iteration time.
             Recommended for lightweight or stochastic processing.
@@ -334,9 +338,7 @@ class SpectrumDataset(torch.utils.data.Dataset):
                     keep_in_memory=save_to is None,
                     cache_dir=cache_dir,
                 )
-            if save_to is not None:
-                ds.save_to_disk(str(save_to))
-                ds = Dataset.load_from_disk(str(save_to))
+            ds = hf_persist(ds, save_to)
         return cls._create(ds, transform=transform)
 
     @classmethod
@@ -386,7 +388,7 @@ class SpectrumDataset(torch.utils.data.Dataset):
             )
         if "precursor_mz" not in ds.column_names:
             warnings.warn(
-                "Dataset has no 'precursor_mz' column. SpectrumEmbedder requires it. "
+                "Dataset has no 'precursor_mz' column. SpectrumEncoder requires it. "
                 "Build via from_list or from_mgf to include it automatically.",
                 stacklevel=2,
             )
@@ -596,15 +598,11 @@ class SpectrumDataset(torch.utils.data.Dataset):
                 with_indices=True,
                 num_proc=num_workers if num_workers > 1 else None,
                 keep_in_memory=in_memory,
-                cache_file_name=None
-                if in_memory
-                else os.path.join(cache_dir, uuid.uuid4().hex + ".arrow"),
+                cache_file_name=hf_cache_file(cache_dir, in_memory),
                 desc=f"Assigning subformulae ({name})",
             )
 
-            if save_to is not None:
-                mapped_ds.save_to_disk(str(save_to))
-                mapped_ds = Dataset.load_from_disk(str(save_to))
+            mapped_ds = hf_persist(mapped_ds, save_to)
 
         return type(self)._create(mapped_ds, transform=self.transform)
 

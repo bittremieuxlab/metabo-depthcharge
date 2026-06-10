@@ -39,6 +39,38 @@ def test_canonical_smiles_normalizes_input():
     assert a == b
 
 
+def test_properties_are_cached_and_do_not_track_smiles(aspirin, caffeine):
+    m = Molecule(aspirin)
+    formula = m.formula
+    # cached_property is sticky: reassigning smiles does NOT invalidate it.
+    m.smiles = caffeine
+    assert m.formula == formula
+
+
+# --- Equality and hashing (by inchikey_2d) -------------------------------
+
+
+def test_equality_ignores_stereochemistry():
+    # Enantiomers of alanine share a 2D skeleton → equal and hash-equal.
+    a = Molecule("C[C@H](N)C(=O)O")
+    b = Molecule("C[C@@H](N)C(=O)O")
+    assert a == b
+    assert hash(a) == hash(b)
+
+
+def test_distinct_molecules_are_unequal(aspirin, caffeine):
+    assert Molecule(aspirin) != Molecule(caffeine)
+
+
+def test_set_dedups_by_inchikey_2d(aspirin, caffeine):
+    mols = {Molecule(aspirin), Molecule(aspirin), Molecule(caffeine)}
+    assert len(mols) == 2
+
+
+def test_equality_against_non_molecule_is_false(aspirin):
+    assert Molecule(aspirin) != aspirin  # str, not Molecule
+
+
 # --- Derived properties --------------------------------------------------
 
 
@@ -76,9 +108,9 @@ def test_properties_constant_matches_class_attributes():
 
     for name in PROPERTIES:
         attr = getattr(Molecule, name)
-        assert isinstance(
-            attr, property | cached_property
-        ), f"PROPERTIES contains {name!r} but Molecule has no property by that name"
+        assert isinstance(attr, property | cached_property), (
+            f"PROPERTIES contains {name!r} but Molecule has no property by that name"
+        )
 
 
 # --- from_dict -----------------------------------------------------------
@@ -175,6 +207,22 @@ def test_standardize_metadata_is_dropped():
     assert not hasattr(out, "metadata")
 
 
+def test_standardize_leaves_original_untouched():
+    # standardize returns a new Molecule; the source instance keeps its
+    # stereochemistry even when remove_stereo strips it from the copy.
+    m = Molecule("C[C@H](N)C(=O)O")
+    out = m.standardize()  # remove_stereo=True by default
+    assert "@" not in out.canonical_smiles  # copy lost stereo
+    assert "@" in m.canonical_smiles  # original retained it
+
+
+def test_standardize_failure_returns_none_without_mutating():
+    bad = "F[P](F)(F)(F)(F)(F)F"  # parses via fallback, Cleanup re-fails
+    m = Molecule(bad)
+    assert m.standardize() is None
+    assert m.smiles == bad
+
+
 # --- Representations: MoleculeToMorgan -----------------------------------
 
 
@@ -182,10 +230,10 @@ def test_morgan_single_shape(aspirin_mol):
     assert MoleculeToMorgan()(aspirin_mol).shape == (4096,)
 
 
-def test_morgan_custom_fp_size(aspirin_mol):
-    enc = MoleculeToMorgan(fp_size=2048)
+def test_morgan_custom_rep_size(aspirin_mol):
+    enc = MoleculeToMorgan(rep_size=2048)
     assert enc(aspirin_mol).shape == (2048,)
-    assert enc.fp_size == 2048
+    assert enc.rep_size == 2048
 
 
 def test_morgan_batch_stacks(aspirin_mol, caffeine):
@@ -194,13 +242,13 @@ def test_morgan_batch_stacks(aspirin_mol, caffeine):
 
 
 def test_morgan_binary_values(aspirin_mol):
-    fp = MoleculeToMorgan()(aspirin_mol)
-    assert set(np.unique(fp)).issubset({0, 1})
+    rep = MoleculeToMorgan()(aspirin_mol)
+    assert set(np.unique(rep)).issubset({0, 1})
 
 
 def test_morgan_counts_nonnegative(aspirin_mol):
-    fp = MoleculeToMorgan(counts=True)(aspirin_mol)
-    assert (fp >= 0).all()
+    rep = MoleculeToMorgan(counts=True)(aspirin_mol)
+    assert (rep >= 0).all()
 
 
 def test_morgan_distinguishes_molecules(aspirin_mol, caffeine):
@@ -211,26 +259,26 @@ def test_morgan_distinguishes_molecules(aspirin_mol, caffeine):
 # --- Representations: MoleculeToRdkit ------------------------------------
 
 
-def test_rdkit_fp_single_shape(aspirin_mol):
+def test_rdkit_single_shape(aspirin_mol):
     assert MoleculeToRdkit()(aspirin_mol).shape == (4096,)
 
 
-def test_rdkit_fp_batch(aspirin_mol, caffeine):
+def test_rdkit_batch(aspirin_mol, caffeine):
     fps = MoleculeToRdkit()([aspirin_mol, Molecule(caffeine)])
     assert fps.shape == (2, 4096)
 
 
-def test_rdkit_fp_binary(aspirin_mol):
-    fp = MoleculeToRdkit()(aspirin_mol)
-    assert set(np.unique(fp)).issubset({0, 1})
+def test_rdkit_binary(aspirin_mol):
+    rep = MoleculeToRdkit()(aspirin_mol)
+    assert set(np.unique(rep)).issubset({0, 1})
 
 
 # --- Representations: MoleculeToMACCS ------------------------------------
 
 
-def test_maccs_fp_size_constant(aspirin_mol):
+def test_maccs_rep_size_constant(aspirin_mol):
     enc = MoleculeToMACCS()
-    assert enc.fp_size == 167
+    assert enc.rep_size == 167
     assert enc(aspirin_mol).shape == (167,)
 
 
@@ -240,16 +288,16 @@ def test_maccs_batch(aspirin_mol, caffeine):
 
 
 def test_maccs_binary(aspirin_mol):
-    fp = MoleculeToMACCS()(aspirin_mol)
-    assert set(np.unique(fp)).issubset({0, 1})
+    rep = MoleculeToMACCS()(aspirin_mol)
+    assert set(np.unique(rep)).issubset({0, 1})
 
 
 # --- Representations: MoleculeToBiosynfoni -------------------------------
 
 
-def test_biosynfoni_fp_size_constant(aspirin_mol):
+def test_biosynfoni_rep_size_constant(aspirin_mol):
     enc = MoleculeToBiosynfoni()
-    assert enc.fp_size == 39
+    assert enc.rep_size == 39
     assert enc(aspirin_mol).shape == (39,)
 
 
@@ -265,10 +313,10 @@ def test_map4_single_shape(aspirin_mol):
     assert MoleculeToMAP4()(aspirin_mol).shape == (4096,)
 
 
-def test_map4_custom_fp_size(aspirin_mol):
-    enc = MoleculeToMAP4(fp_size=1024)
+def test_map4_custom_rep_size(aspirin_mol):
+    enc = MoleculeToMAP4(rep_size=1024)
     assert enc(aspirin_mol).shape == (1024,)
-    assert enc.fp_size == 1024
+    assert enc.rep_size == 1024
 
 
 def test_map4_batch(aspirin_mol, caffeine):
@@ -279,8 +327,8 @@ def test_map4_batch(aspirin_mol, caffeine):
 def test_map4_binary_values(aspirin_mol):
     # Verified empirically in the package: this library folds MinHash
     # signatures into a binary indicator vector.
-    fp = MoleculeToMAP4()(aspirin_mol)
-    assert set(np.unique(fp)).issubset({0, 1})
+    rep = MoleculeToMAP4()(aspirin_mol)
+    assert set(np.unique(rep)).issubset({0, 1})
 
 
 # --- Neural representations (import-only smoke) --------------------------
