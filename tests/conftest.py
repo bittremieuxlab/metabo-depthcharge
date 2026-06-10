@@ -48,7 +48,5 @@ def tiny_tsv_with_salt(tmp_path: Path) -> Path:
 def tiny_tsv_with_formula(tmp_path: Path) -> Path:
     """TSV with a sentinel ``formula`` column to test recompute_properties."""
     path = tmp_path / "tiny_with_formula.tsv"
-    path.write_text(
-        "smiles\tformula\n" f"{ASPIRIN}\tFROM_CSV_A\n" f"{CAFFEINE}\tFROM_CSV_B\n"
-    )
+    path.write_text(f"smiles\tformula\n{ASPIRIN}\tFROM_CSV_A\n{CAFFEINE}\tFROM_CSV_B\n")
     return path
