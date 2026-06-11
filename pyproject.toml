@@ -86,3 +86,10 @@ markers = [
     "integration: slower tests that may need data or models",
     "slow: tests that take several seconds",
 ]
+
+# ============================================================================
+# Coverage
+# ============================================================================
+
+[tool.coverage.run]
+omit = ["*/mist_cf/*"]
