@@ -1,8 +1,10 @@
 import multiprocessing
 import time
+from collections import defaultdict
 from multiprocessing import Pool, cpu_count
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 from tqdm.auto import tqdm
 
 
@@ -145,6 +147,96 @@ def _mces_worker_queue(args, result_queue):
         result_queue.put(np.nan)
 
 
+def _mces_lb_stats(smiles):
+    """Precompute the per-molecule structures the ``filter2`` lower bound needs."""
+    from myopic_mces.graph import construct_graph
+
+    G = construct_graph(str(smiles))
+    atom = {i: G.nodes[i]["atom"] for i in G.nodes}
+    halfdeg = {}
+    nbr = {}
+    by_type = defaultdict(list)
+    for i in G.nodes:
+        by_type[atom[i]].append(i)
+        weights = defaultdict(list)
+        deg = 0.0
+        for k in G.neighbors(i):
+            w = G[i][k]["weight"]
+            deg += w
+            weights[atom[k]].append(w)
+        halfdeg[i] = deg / 2.0
+        nbr[i] = {t: sorted(ws, reverse=True) for t, ws in weights.items()}
+    return by_type, halfdeg, nbr
+
+
+def _mces_pair_cost(nbr1, nbr2):
+    """Cost of mapping one atom to another from their neighbour-weight lists.
+
+    Faithful port of ``myopic_mces.filter_MCES.get_cost``.
+    """
+    diff = 0.0
+    for t, w1 in nbr1.items():
+        w2 = nbr2.get(t)
+        if w2 is None:
+            diff += sum(w1) / 2.0
+            continue
+        n = min(len(w1), len(w2))
+        for a in range(n):
+            diff += abs(w1[a] - w2[a]) / 2.0
+        diff += (sum(w1[n:]) + sum(w2[n:])) / 2.0
+    for t, w2 in nbr2.items():
+        if t not in nbr1:
+            diff += sum(w2) / 2.0
+    return diff
+
+
+def _mces_filter2_lb(stats1, stats2):
+    """Strong myopic-MCES lower bound (``filter2``) from precomputed stats.
+
+    Faithful port of ``myopic_mces.filter_MCES.filter2``, but the per-element
+    minimum-weight full matching is solved with
+    :func:`scipy.optimize.linear_sum_assignment` instead of building a
+    ``networkx`` graph on every call.
+    """
+    by_type1, halfdeg1, nbr1 = stats1
+    by_type2, halfdeg2, nbr2 = stats2
+    total = 0.0
+    for t in by_type1.keys() | by_type2.keys():
+        nodes1 = by_type1.get(t, [])
+        nodes2 = by_type2.get(t, [])
+        n1, n2 = len(nodes1), len(nodes2)
+        m = max(n1, n2)
+        cost = np.zeros((m, m))
+        for a, i in enumerate(nodes1):
+            for b, j in enumerate(nodes2):
+                cost[a, b] = _mces_pair_cost(nbr1[i], nbr2[j])
+        if n1 < n2:  # dummy query atoms -> cost = half degree of target atom
+            for b, j in enumerate(nodes2):
+                cost[n1:, b] = halfdeg2[j]
+        elif n2 < n1:  # dummy target atoms -> cost = half degree of query atom
+            for a, i in enumerate(nodes1):
+                cost[a, n2:] = halfdeg1[i]
+        rows, cols = linear_sum_assignment(cost)
+        total += float(cost[rows, cols].sum())
+    return total
+
+
+_LB_MIN_PAIRS_FOR_POOL = 512
+_LB_POOL_STATS = None
+
+
+def _lb_pool_init(stats):
+    """Pool initializer: stash the shared per-molecule stats in each worker."""
+    global _LB_POOL_STATS
+    _LB_POOL_STATS = stats
+
+
+def _lb_pool_worker(ij):
+    """Worker: look up the precomputed stats for an ``(i, j)`` index pair."""
+    i, j = ij
+    return _mces_filter2_lb(_LB_POOL_STATS[i], _LB_POOL_STATS[j])
+
+
 class MCESDistance:
     """Compute myopic-MCES (Maximum Common Edge Subgraph) distance between molecules.
 
@@ -262,6 +354,65 @@ class MCESDistance:
         bar.close()
         return results
 
+    def _dispatch_lb(self, pairs):
+        """Lower-bound analog of :meth:`_dispatch`: ``(smi1, smi2)`` pairs -> bounds."""
+        if not pairs:
+            return []
+
+        uniq: dict[str, int] = {}
+
+        def index(smi: str) -> int:
+            k = uniq.get(smi)
+            if k is None:
+                k = uniq[smi] = len(uniq)
+            return k
+
+        index_pairs = [(index(a), index(b)) for a, b in pairs]
+        stats = [_mces_lb_stats(smi) for smi in uniq]
+
+        if self.n_jobs == 1 or len(index_pairs) < _LB_MIN_PAIRS_FOR_POOL:
+            bar = tqdm(index_pairs, disable=not self.progress, unit="pair")
+            return [_mces_filter2_lb(stats[i], stats[j]) for i, j in bar]
+
+        bar = tqdm(total=len(index_pairs), disable=not self.progress, unit="pair")
+        chunksize = max(1, len(index_pairs) // (self.n_jobs * 8))
+        results = []
+        with Pool(self.n_jobs, initializer=_lb_pool_init, initargs=(stats,)) as pool:
+            for d in pool.imap(_lb_pool_worker, index_pairs, chunksize=chunksize):
+                results.append(d)
+                bar.update(1)
+        bar.close()
+        return results
+
+    def _broadcast(self, smiles1, smiles2, compute):
+        """Broadcast two SMILES inputs, run ``compute`` over the flat pair list."""
+        s1 = np.asarray(smiles1)
+        s2 = np.asarray(smiles2)
+        shape = np.broadcast_shapes(s1.shape, s2.shape)
+        s1_flat = np.broadcast_to(s1, shape).ravel()
+        s2_flat = np.broadcast_to(s2, shape).ravel()
+        pairs = [(str(a), str(b)) for a, b in zip(s1_flat, s2_flat, strict=False)]
+        result = np.array(compute(pairs), dtype=np.float64).reshape(shape)
+        if result.ndim == 0:
+            return float(result)
+        return result
+
+    def _pairwise(self, smiles, compute):
+        """Symmetric ``(n, n)`` matrix: run ``compute`` over the upper triangle.
+
+        Only the ``i > j`` pairs are evaluated and mirrored; the diagonal stays
+        zero (self-distances are not computed).
+        """
+        arr = np.asarray(smiles).ravel()
+        n = len(arr)
+        index_pairs = [(i, j) for i in range(n) for j in range(i)]
+        pairs = [(str(arr[i]), str(arr[j])) for i, j in index_pairs]
+        dists = compute(pairs)
+        result = np.zeros((n, n), dtype=np.float64)
+        for (i, j), d in zip(index_pairs, dists, strict=False):
+            result[i, j] = result[j, i] = d
+        return result
+
     def __call__(
         self,
         smiles1: str | list[str] | np.ndarray,
@@ -284,27 +435,7 @@ class MCESDistance:
             (scalar if both inputs are single str). For an all-pairs
             matrix, pass e.g. ``smiles1[:, None]`` and ``smiles2[None, :]``.
         """
-        s1 = np.asarray(smiles1)
-        s2 = np.asarray(smiles2)
-
-        shape = np.broadcast_shapes(s1.shape, s2.shape)
-        s1_b = np.broadcast_to(s1, shape)
-        s2_b = np.broadcast_to(s2, shape)
-
-        s1_flat = s1_b.ravel()
-        s2_flat = s2_b.ravel()
-
-        pairs = [(str(a), str(b)) for a, b in zip(s1_flat, s2_flat, strict=False)]
-
-        if len(pairs) == 0:
-            return np.array([], dtype=np.float64).reshape(shape)
-
-        dists = self._dispatch(pairs)
-        result = np.array(dists, dtype=np.float64).reshape(shape)
-
-        if result.ndim == 0:
-            return float(result)
-        return result
+        return self._broadcast(smiles1, smiles2, self._dispatch)
 
     def pairwise(self, smiles: list[str] | np.ndarray) -> np.ndarray:
         """Symmetric pairwise distance matrix, computing only the upper triangle.
@@ -321,14 +452,54 @@ class MCESDistance:
             diagonal is zero (self-distances are not computed); only the
             upper triangle is computed and mirrored to the lower triangle.
         """
-        arr = np.asarray(smiles).ravel()
-        n = len(arr)
-        pairs = [(str(arr[i]), str(arr[j])) for i in range(n) for j in range(i)]
-        dists = self._dispatch(pairs) if pairs else []
-        result = np.zeros((n, n), dtype=np.float64)
-        idx = 0
-        for i in range(n):
-            for j in range(i):
-                result[i, j] = result[j, i] = dists[idx]
-                idx += 1
-        return result
+        return self._pairwise(smiles, self._dispatch)
+
+    def lower_bound(
+        self,
+        smiles1: str | list[str] | np.ndarray,
+        smiles2: str | list[str] | np.ndarray,
+    ) -> float | np.ndarray:
+        """Compute Lower Bounds on MCES distances using numpy broadcasting.
+
+        Inputs are broadcast together following standard numpy rules.
+        Each element-pair produces one scalar LB on distance (like :meth:`__call__`).
+
+        This method never invokes the ILP solver. Equivalent to calling
+        :meth:`__call__` when ``MCES(..., threshold=0)``, but with a more efficient
+        backbone implementation . The ``threshold``, ``solver`` and
+        ``always_stronger_bound`` attributes do not affect this method.
+
+        Parameters
+        ----------
+        smiles1, smiles2: str, List[str], or np.ndarray of strings
+            SMILES inputs with broadcast-compatible shapes. For an all-pairs
+            matrix, pass e.g. ``smiles1[:, None]`` and ``smiles2[None, :]``.
+
+        Returns
+        -------
+        float or np.ndarray
+            Lower bounds(s) with shape equal to the broadcasted shape
+            (scalar if both inputs are single str). For an all-pairs
+            matrix, pass e.g. ``smiles1[:, None]`` and ``smiles2[None, :]``.
+        """
+        return self._broadcast(smiles1, smiles2, self._dispatch_lb)
+
+    def lower_bound_pairwise(self, smiles: list[str] | np.ndarray) -> np.ndarray:
+        """Symmetric pairwise LB distance matrix, computing only the upper triangle.
+
+        Like :meth:`pairwise` but uses the solver-free strong lower bound of
+        :meth:`lower_bound`.
+
+        Parameters
+        ----------
+        smiles : list[str] or np.ndarray
+            SMILES inputs; flattened to 1-D, giving ``n`` molecules.
+
+        Returns
+        -------
+        np.ndarray
+            ``(n, n)`` symmetric matrix of pairwise MCES distances. The
+            diagonal is zero (self-distances are not computed); only the
+            upper triangle is computed and mirrored to the lower triangle.
+        """
+        return self._pairwise(smiles, self._dispatch_lb)
