@@ -155,7 +155,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
         properties : list[str], optional
             Properties to materialize as columns
             Any of (``canonical_smiles``, ``inchi``, ``inchikey``,
-            `inchikey_2d``, ``formula``, ``exact_mass``).
+            ``inchikey_2d``, ``formula``, ``exact_mass``).
             Other names/RDKit properties are not implemented.
         recompute_properties : bool, default False
             If False, skip computing a property whose column already exists in
