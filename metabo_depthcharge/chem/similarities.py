@@ -151,7 +151,10 @@ def _mces_lb_stats(smiles):
     """Precompute the per-molecule structures the ``filter2`` lower bound needs."""
     from myopic_mces.graph import construct_graph
 
-    G = construct_graph(str(smiles))
+    try:
+        G = construct_graph(str(smiles))
+    except (AttributeError, ValueError):
+        return None
     atom = {i: G.nodes[i]["atom"] for i in G.nodes}
     halfdeg = {}
     nbr = {}
@@ -198,6 +201,8 @@ def _mces_filter2_lb(stats1, stats2):
     :func:`scipy.optimize.linear_sum_assignment` instead of building a
     ``networkx`` graph on every call.
     """
+    if stats1 is None or stats2 is None:
+        return np.nan
     by_type1, halfdeg1, nbr1 = stats1
     by_type2, halfdeg2, nbr2 = stats2
     total = 0.0
