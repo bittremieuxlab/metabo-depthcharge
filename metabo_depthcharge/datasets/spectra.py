@@ -497,6 +497,41 @@ class SpectrumDataset(torch.utils.data.Dataset):
             adduct_from_subformula=self.adduct_from_subformula,
         )
 
+    def select(self, indices: Iterable[int], **kwargs) -> "SpectrumDataset":
+        """Return a new dataset with only the rows at ``indices``, in that order.
+
+        Thin wrapper over :meth:`datasets.Dataset.select` that preserves
+        ``self.transform`` and the subformula configuration and returns the
+        concrete subclass type. Use it to materialize a row subset (e.g. a
+        train/val/test fold) as a standalone dataset.
+
+        Parameters
+        ----------
+        indices : Iterable[int]
+            Row indices to keep, in the desired output order. Duplicates and
+            arbitrary orderings are allowed.
+        **kwargs
+            Passed to :meth:`datasets.Dataset.select` (e.g.
+            ``keep_in_memory=True``).
+
+        Returns
+        -------
+        SpectrumDataset
+
+        Examples
+        --------
+        .. code-block:: python
+
+            ds.select([0, 5, 5, 2])
+        """
+        return type(self)._create(
+            self.ds.select(indices, **kwargs),
+            transform=self.transform,
+            subformulae_name=self.subformulae_name,
+            drop_peaks_without_subformula=self.drop_peaks_without_subformula,
+            adduct_from_subformula=self.adduct_from_subformula,
+        )
+
     def add_subformulae(
         self,
         name: str,

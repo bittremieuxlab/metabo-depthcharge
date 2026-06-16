@@ -582,6 +582,34 @@ class MoleculeDataset(torch.utils.data.Dataset):
         """
         return type(self)._create(self.ds.filter(condition, **kwargs))
 
+    def select(self, indices: Iterable[int], **kwargs) -> "MoleculeDataset":
+        """Return a new dataset with only the rows at ``indices``, in that order.
+
+        Thin wrapper over :meth:`datasets.Dataset.select` that returns the
+        concrete subclass type. Use it to materialize a row subset (e.g. a
+        train/val/test fold) as a standalone dataset.
+
+        Parameters
+        ----------
+        indices : Iterable[int]
+            Row indices to keep, in the desired output order. Duplicates and
+            arbitrary orderings are allowed.
+        **kwargs
+            Passed to :meth:`datasets.Dataset.select` (e.g.
+            ``keep_in_memory=True``).
+
+        Returns
+        -------
+        MoleculeDataset
+
+        Examples
+        --------
+        .. code-block:: python
+
+            ds.select([0, 5, 5, 2])
+        """
+        return type(self)._create(self.ds.select(indices, **kwargs))
+
     def __len__(self) -> int:
         return len(self.ds)
 
