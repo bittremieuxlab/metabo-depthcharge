@@ -8,7 +8,11 @@ from depthcharge.transformers import SpectrumTransformerEncoder
 from metabo_depthcharge.encoders.nn import AttnAggregator
 from metabo_depthcharge.mist_cf.nn_utils import get_embedder
 from metabo_depthcharge.spec.adducts import N_ADDUCTS
-from metabo_depthcharge.spec.metadata_parsers import N_INSTRUMENTS
+from metabo_depthcharge.spec.metadata_parsers import (
+    N_INSTRUMENTS,
+    N_ION_ACTIVATIONS,
+    N_IONIZATION_METHODS,
+)
 
 
 class MetadataEncoder(nn.Module):
@@ -37,6 +41,16 @@ class MetadataEncoder(nn.Module):
       :class:`torch.nn.Linear`. A value of ``0.0`` is treated as missing and
       masked back to zeros after the projection (the bias would otherwise
       leak a nonzero embedding).
+    - ``"ion_activation"`` — a categorical index into the ion activation
+      vocabulary (e.g. HCD, CID). See
+      :func:`~metabo_depthcharge.spec.metadata_parsers.encode_ion_activation`.
+      Embedded via :class:`torch.nn.Embedding`.
+      Unknown methods should be passed as 0, which is assigned a zero embedding.
+    - ``"ionization_method"`` — a categorical index into the ionization method
+      vocabulary (e.g. ESI, NSI, APCI). See
+      :func:`~metabo_depthcharge.spec.metadata_parsers.encode_ionization_method`.
+      Embedded via :class:`torch.nn.Embedding`.
+      Unknown methods should be passed as 0, which is assigned a zero embedding.
 
     Missing values (index 0 for the categoricals, ``0.0`` for collision
     energy) therefore contribute zero to the sum for that sample, and only
@@ -48,7 +62,7 @@ class MetadataEncoder(nn.Module):
         Output embedding dimension.
     metadata_fields : list[str]
         Field names to encode; subset of
-        ``["adduct", "collision_energy", "instrument_type"]``.
+        ``["adduct", "collision_energy", "instrument_type", "ion_activation", "ionization_method"]``.
     """
 
     def __init__(self, d_model: int, metadata_fields: list[str]):
@@ -66,6 +80,16 @@ class MetadataEncoder(nn.Module):
 
         if "instrument_type" in metadata_fields:
             self.instrument_emb = nn.Embedding(N_INSTRUMENTS, d_model, padding_idx=0)
+
+        if "ion_activation" in metadata_fields:
+            self.ion_activation_emb = nn.Embedding(
+                N_ION_ACTIVATIONS, d_model, padding_idx=0
+            )
+
+        if "ionization_method" in metadata_fields:
+            self.ionization_method_emb = nn.Embedding(
+                N_IONIZATION_METHODS, d_model, padding_idx=0
+            )
 
     def forward(self, metadata: dict[str, torch.Tensor]) -> torch.Tensor:
         """Encode metadata fields into a summed embedding.
@@ -99,6 +123,17 @@ class MetadataEncoder(nn.Module):
 
         if "instrument_type" in self.metadata_fields and "instrument_type" in metadata:
             parts.append(self.instrument_emb(metadata["instrument_type"].long()))
+
+        if "ion_activation" in self.metadata_fields and "ion_activation" in metadata:
+            parts.append(self.ion_activation_emb(metadata["ion_activation"].long()))
+
+        if (
+            "ionization_method" in self.metadata_fields
+            and "ionization_method" in metadata
+        ):
+            parts.append(
+                self.ionization_method_emb(metadata["ionization_method"].long())
+            )
 
         if not parts:
             warnings.warn(

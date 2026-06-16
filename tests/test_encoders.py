@@ -14,6 +14,46 @@ from metabo_depthcharge.encoders import (  # noqa: E402
     ResidualNetwork,
     SpectrumEncoder,
 )
+from metabo_depthcharge.spec.metadata_parsers import (  # noqa: E402
+    encode_ion_activation,
+    encode_ionization_method,
+)
+
+
+# ---------------------------------------------------------------------------
+# encode_ion_activation / encode_ionization_method
+# ---------------------------------------------------------------------------
+
+
+def test_encode_ion_activation_known():
+    assert encode_ion_activation("HCD") == 1
+    assert encode_ion_activation("CID") == 2
+
+
+def test_encode_ion_activation_unknown():
+    assert encode_ion_activation("") == 0
+    assert encode_ion_activation(None) == 0
+    assert encode_ion_activation("UNKNOWN") == 0
+
+
+def test_encode_ion_activation_case_insensitive():
+    assert encode_ion_activation("hcd") == encode_ion_activation("HCD")
+
+
+def test_encode_ionization_method_known():
+    assert encode_ionization_method("NSI") == 1
+    assert encode_ionization_method("ESI") == 2
+    assert encode_ionization_method("APCI") == 3
+
+
+def test_encode_ionization_method_unknown():
+    assert encode_ionization_method("") == 0
+    assert encode_ionization_method(None) == 0
+    assert encode_ionization_method("MALDI") == 0
+
+
+def test_encode_ionization_method_case_insensitive():
+    assert encode_ionization_method("esi") == encode_ionization_method("ESI")
 
 
 # ---------------------------------------------------------------------------
@@ -47,15 +87,49 @@ def test_metadata_encoder_ce_missing_zero():
     assert torch.allclose(out, torch.zeros_like(out))
 
 
+def test_metadata_encoder_ion_activation_output_shape():
+    enc = MetadataEncoder(d_model=32, metadata_fields=["ion_activation"])
+    out = enc({"ion_activation": torch.ones(4, dtype=torch.long)})
+    assert out.shape == (4, 32)
+
+
+def test_metadata_encoder_unknown_ion_activation_zero():
+    """Ion activation index 0 is padding_idx → embedding should be zero."""
+    enc = MetadataEncoder(d_model=16, metadata_fields=["ion_activation"])
+    out = enc({"ion_activation": torch.zeros(3, dtype=torch.long)})
+    assert torch.allclose(out, torch.zeros_like(out))
+
+
+def test_metadata_encoder_ionization_method_output_shape():
+    enc = MetadataEncoder(d_model=32, metadata_fields=["ionization_method"])
+    out = enc({"ionization_method": torch.ones(4, dtype=torch.long)})
+    assert out.shape == (4, 32)
+
+
+def test_metadata_encoder_unknown_ionization_method_zero():
+    """Ionization method index 0 is padding_idx → embedding should be zero."""
+    enc = MetadataEncoder(d_model=16, metadata_fields=["ionization_method"])
+    out = enc({"ionization_method": torch.zeros(3, dtype=torch.long)})
+    assert torch.allclose(out, torch.zeros_like(out))
+
+
 def test_metadata_encoder_combined_fields():
     enc = MetadataEncoder(
         d_model=32,
-        metadata_fields=["adduct", "collision_energy", "instrument_type"],
+        metadata_fields=[
+            "adduct",
+            "collision_energy",
+            "instrument_type",
+            "ion_activation",
+            "ionization_method",
+        ],
     )
     meta = {
         "adduct": torch.ones(4, dtype=torch.long),
         "collision_energy": torch.rand(4),
         "instrument_type": torch.ones(4, dtype=torch.long),
+        "ion_activation": torch.ones(4, dtype=torch.long),
+        "ionization_method": torch.ones(4, dtype=torch.long),
     }
     out = enc(meta)
     assert out.shape == (4, 32)
