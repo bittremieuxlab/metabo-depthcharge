@@ -21,7 +21,7 @@ from metabo_depthcharge.spec.adducts import encode_adduct
 #:
 #: * ``0`` — unknown / missing
 #: * ``1`` — ``orbitrap``
-#: * ``2`` — ``qtof``
+#: * ``2`` — ``qtof`` or `q-tof`
 #: * ``3`` — ``iontrap``
 INSTRUMENT_TYPES = [
     "orbitrap",
@@ -30,6 +30,8 @@ INSTRUMENT_TYPES = [
 ]
 _INSTRUMENT_TO_IDX = {t: i + 1 for i, t in enumerate(INSTRUMENT_TYPES)}
 N_INSTRUMENTS = len(INSTRUMENT_TYPES) + 1  # +1 for unknown at index 0
+#: Alternate spellings for instrument strings that are automatically resolved.
+_INSTRUMENT_ALIASES = {"q-tof": "qtof"}
 
 
 def encode_instrument(instrument_str: str) -> int:
@@ -47,7 +49,8 @@ def encode_instrument(instrument_str: str) -> int:
     """
     if not instrument_str or instrument_str in ("nan", "None", ""):
         return 0
-    return _INSTRUMENT_TO_IDX.get(instrument_str.strip().lower(), 0)
+    key = instrument_str.strip().lower()
+    return _INSTRUMENT_TO_IDX.get(_INSTRUMENT_ALIASES.get(key, key), 0)
 
 
 def encode_collision_energy(raw) -> float:
