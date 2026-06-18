@@ -123,7 +123,7 @@ _IONIZATION_METHOD_TO_IDX = {m: i + 1 for i, m in enumerate(IONIZATION_METHODS)}
 N_IONIZATION_METHODS = len(IONIZATION_METHODS) + 1  # +1 for unknown at index 0
 
 
-def encode_ion_activation(ion_activation_str: str) -> int:
+def encode_ion_activation(ion_activation_str: str | None) -> int:
     """Encode an ion activation method string to a vocabulary index.
 
     Returns 0 for unknown/missing methods. Case-insensitive matching.
@@ -143,7 +143,7 @@ def encode_ion_activation(ion_activation_str: str) -> int:
     return _ION_ACTIVATION_TO_IDX.get(ion_activation_str.strip().upper(), 0)
 
 
-def encode_ionization_method(ionization_method_str: str) -> int:
+def encode_ionization_method(ionization_method_str: str | None) -> int:
     """Encode an ionization method string to a vocabulary index.
 
     Returns 0 for unknown/missing methods. Case-insensitive matching.
