@@ -110,12 +110,71 @@ def encode_collision_energy(raw) -> float:
     return 0.0
 
 
+#: Ion activation methods, checkpoint-stable: append-only, never reorder or remove.
+#: Index 0 is reserved for unknown/missing; each method's index is its 1-based position.
+ION_ACTIVATION_METHODS = ["HCD", "CID"]
+_ION_ACTIVATION_TO_IDX = {m: i + 1 for i, m in enumerate(ION_ACTIVATION_METHODS)}
+N_ION_ACTIVATIONS = len(ION_ACTIVATION_METHODS) + 1  # +1 for unknown at index 0
+
+#: Ionization methods, checkpoint-stable: append-only, never reorder or remove.
+#: Index 0 is reserved for unknown/missing; each method's index is its 1-based position.
+IONIZATION_METHODS = ["NSI", "ESI", "APCI"]
+_IONIZATION_METHOD_TO_IDX = {m: i + 1 for i, m in enumerate(IONIZATION_METHODS)}
+N_IONIZATION_METHODS = len(IONIZATION_METHODS) + 1  # +1 for unknown at index 0
+
+
+def encode_ion_activation(ion_activation_str: str | None) -> int:
+    """Encode an ion activation method string to a vocabulary index.
+
+    Returns 0 for unknown/missing methods. Case-insensitive matching.
+
+    Parameters
+    ----------
+    ion_activation_str : str
+        Ion activation method (e.g. ``"HCD"``, ``"CID"``).
+
+    Returns
+    -------
+    int
+        1-based index into :data:`ION_ACTIVATION_METHODS`, or 0 for unknown.
+    """
+    if not ion_activation_str or ion_activation_str in ("nan", "None", ""):
+        return 0
+    return _ION_ACTIVATION_TO_IDX.get(ion_activation_str.strip().upper(), 0)
+
+
+def encode_ionization_method(ionization_method_str: str | None) -> int:
+    """Encode an ionization method string to a vocabulary index.
+
+    Returns 0 for unknown/missing methods. Case-insensitive matching.
+
+    Parameters
+    ----------
+    ionization_method_str : str
+        Ionization method (e.g. ``"ESI"``, ``"NSI"``, ``"APCI"``).
+
+    Returns
+    -------
+    int
+        1-based index into :data:`IONIZATION_METHODS`, or 0 for unknown.
+    """
+    if not ionization_method_str or ionization_method_str in ("nan", "None", ""):
+        return 0
+    return _IONIZATION_METHOD_TO_IDX.get(ionization_method_str.strip().upper(), 0)
+
+
 #: The canonical, ordered set of NN-encoded metadata field names. Exists as an
 #: explicit allow-list so :class:`~metabo_depthcharge.datasets.SpectrumDataset`
 #: can validate user-requested metadata columns, and so
 #: :class:`~metabo_depthcharge.encoders.MetadataEncoder` knows which fields it
 #: may read.
-METADATA_FIELDS = ["adduct", "collision_energy", "instrument_type"]
+METADATA_FIELDS = [
+    "adduct",
+    "collision_energy",
+    "instrument_type",
+    "ion_activation",
+    "ionization_method",
+]
 
 #: Dictionary mapping string to tuple.
 #: e.g., {"adduct": (encode_adduct, Value("int64"))}
@@ -129,5 +188,7 @@ METADATA_PARSERS = {
     "adduct": (encode_adduct, Value("int64")),
     "collision_energy": (encode_collision_energy, Value("float32")),
     "instrument_type": (encode_instrument, Value("int64")),
+    "ion_activation": (encode_ion_activation, Value("int64")),
+    "ionization_method": (encode_ionization_method, Value("int64")),
 }
 assert list(METADATA_PARSERS) == METADATA_FIELDS

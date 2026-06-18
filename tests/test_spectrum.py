@@ -243,6 +243,42 @@ def test_metadata_fields_encoded_and_batched(tiny_mgf_with_metadata):
     assert md["adduct"].tolist() == [1, 6, 0]
 
 
+def test_ion_activation_and_ionization_method_encoded(tmp_path):
+    path = tmp_path / "tiny_ia.mgf"
+    path.write_text(
+        "BEGIN IONS\n"
+        "PEPMASS=200.0\n"
+        "ION_ACTIVATION=HCD\n"
+        "IONIZATION_METHOD=ESI\n"
+        "50.0 5.0\n100.0 10.0\n"
+        "END IONS\n"
+        "BEGIN IONS\n"
+        "PEPMASS=300.0\n"
+        "ION_ACTIVATION=CID\n"
+        "IONIZATION_METHOD=NSI\n"
+        "75.0 3.0\n"
+        "END IONS\n"
+        "BEGIN IONS\n"
+        "PEPMASS=400.0\n"
+        "80.0 1.0\n"
+        "END IONS\n"
+    )
+    ds = SpectrumDataset.from_mgf(
+        path,
+        metadata=["ion_activation", "ionization_method"],
+        columns={},
+    )
+    assert ds.ds.features["ion_activation"].dtype == "int64"
+    assert ds.ds.features["ionization_method"].dtype == "int64"
+
+    assert int(ds[0]["ion_activation"]) == 1  # HCD → 1
+    assert int(ds[1]["ion_activation"]) == 2  # CID → 2
+    assert int(ds[2]["ion_activation"]) == 0  # missing → 0
+    assert int(ds[0]["ionization_method"]) == 2  # ESI → 2
+    assert int(ds[1]["ionization_method"]) == 1  # NSI → 1
+    assert int(ds[2]["ionization_method"]) == 0  # missing → 0
+
+
 def test_metadata_feeds_metadata_encoder(tiny_mgf_with_metadata):
     from metabo_depthcharge.encoders.spectra import MetadataEncoder
 
