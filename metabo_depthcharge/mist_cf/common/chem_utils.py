@@ -70,30 +70,80 @@ element_to_ind = dict(zip(VALID_ELEMENTS, np.arange(len(VALID_ELEMENTS)), strict
 element_to_position = dict(zip(VALID_ELEMENTS, ELEMENT_VECTORS, strict=False))
 element_to_position_mass = dict(zip(VALID_ELEMENTS, ELEMENT_VECTORS_MASS, strict=False))
 
-POS_ION_LST = [
+# Canonical adduct order. Indices 0-10 are the original alphabet and MUST stay
+# put: the model's ion embedding is one-hot indexed by position in ION_LST, so
+# reordering would silently invalidate every prior checkpoint. New adducts are
+# appended (indices 11+) so existing indices never move.
+#
+# Multimer ([2M+...]) adducts are supported via ion_to_nmer: the neutral
+# *monomer* mass relates to the precursor m/z by an n-mer factor (see
+# precursor_mz_to_neutral_mass / neutral_mass_to_precursor_mz). Charge is
+# assumed 1 for every adduct here. This alphabet is aligned with
+# metabo_depthcharge.spec.adducts.ADDUCT_VOCAB.
+_ION_LST_BASE = [
+    # positive (indices 0-6)
     "[M+H]+",
     "[M+Na]+",
     "[M+K]+",
     "[M-H2O+H]+",
-    "[M+H3N+H]+",
+    "[M+H3N+H]+",  # == [M+NH4]+
     "[M]+",
     "[M-H4O2+H]+",
-]
-
-NEG_ION_LST = [
+    # negative (indices 7-10)
     "[M-H]-",
     "[M+Cl]-",
     "[M+HCOOH-H]-",  # formate adduct: net +CHO2
     "[M+CH3COOH-H]-",  # acetate adduct: net +C2H3O2
 ]
+_ION_LST_EXTRA = [
+    # appended (indices 11+) to align with metabo-depthcharge's ADDUCT_VOCAB
+    "[M+Br]-",  # bromide (monomer)
+    "[2M+H]+",
+    "[2M+Na]+",
+    "[2M-H]-",
+    "[2M+HCOOH-H]-",
+    "[2M+CH3COOH-H]-",
+]
+ION_LST = _ION_LST_BASE + _ION_LST_EXTRA
 
-# Positive indices come first so any previously-trained checkpoint keeps its
-# positive-ion embedding indices stable. New negative indices append at the end.
-ION_LST = POS_ION_LST + NEG_ION_LST
+ion_to_mode = {
+    "[M+H]+": "pos",
+    "[M+Na]+": "pos",
+    "[M+K]+": "pos",
+    "[M-H2O+H]+": "pos",
+    "[M+H3N+H]+": "pos",
+    "[M]+": "pos",
+    "[M-H4O2+H]+": "pos",
+    "[2M+H]+": "pos",
+    "[2M+Na]+": "pos",
+    "[M-H]-": "neg",
+    "[M+Cl]-": "neg",
+    "[M+HCOOH-H]-": "neg",
+    "[M+CH3COOH-H]-": "neg",
+    "[M+Br]-": "neg",
+    "[2M-H]-": "neg",
+    "[2M+HCOOH-H]-": "neg",
+    "[2M+CH3COOH-H]-": "neg",
+}
+assert set(ion_to_mode) == set(ION_LST), "ion_to_mode must cover exactly ION_LST"
 
+# Number of monomers M in the adduct (1 for [M+...], 2 for [2M+...]). With charge
+# fixed at 1 this gives precursor_mz = nmer * neutral_monomer_mass + ion_to_mass.
+ion_to_nmer = dict.fromkeys(ION_LST, 1)
+ion_to_nmer.update(
+    {
+        "[2M+H]+": 2,
+        "[2M+Na]+": 2,
+        "[2M-H]-": 2,
+        "[2M+HCOOH-H]-": 2,
+        "[2M+CH3COOH-H]-": 2,
+    }
+)
+
+# Mode-membership lists, derived so they always track ION_LST / ion_to_mode.
+POS_ION_LST = [i for i in ION_LST if ion_to_mode[i] == "pos"]
+NEG_ION_LST = [i for i in ION_LST if ion_to_mode[i] == "neg"]
 ion_mode_to_ions = {"pos": POS_ION_LST, "neg": NEG_ION_LST}
-ion_to_mode = dict.fromkeys(POS_ION_LST, "pos")
-ion_to_mode.update(dict.fromkeys(NEG_ION_LST, "neg"))
 
 ion_remap = dict(zip(ION_LST, ION_LST, strict=False))
 ion_remap.update(
@@ -110,16 +160,25 @@ ion_remap.update(
         "[M-2(H2O)+H]+": "[M-H4O2+H]+",
         "[M+H-2H2O]+": "[M-H4O2+H]+",
         "[M+H-H2O]+": "[M-H2O+H]+",
+        "2M+H": "[2M+H]+",
+        "2M+Na": "[2M+Na]+",
         # negative-mode aliases
         "M-H": "[M-H]-",
         "[M-H]": "[M-H]-",
         "M+Cl": "[M+Cl]-",
+        "M+Br": "[M+Br]-",
         "[M+FA-H]-": "[M+HCOOH-H]-",
         "M+HCOO-": "[M+HCOOH-H]-",
         "[M+HCOO]-": "[M+HCOOH-H]-",
         "[M+AcOH-H]-": "[M+CH3COOH-H]-",
+        "[M+Hac-H]-": "[M+CH3COOH-H]-",
         "[M+OAc]-": "[M+CH3COOH-H]-",
         "[M+CH3COO]-": "[M+CH3COOH-H]-",
+        "2M-H": "[2M-H]-",
+        "[2M-H]": "[2M-H]-",
+        "[2M+FA-H]-": "[2M+HCOOH-H]-",
+        "[2M+Hac-H]-": "[2M+CH3COOH-H]-",
+        "[2M+AcOH-H]-": "[2M+CH3COOH-H]-",
     }
 )
 
@@ -145,6 +204,20 @@ ion_to_mass = {
     + 3 * ELEMENT_TO_MASS["H"]
     + 2 * ELEMENT_TO_MASS["O"]
     + ELECTRON_MASS,
+    "[M+Br]-": ELEMENT_TO_MASS["Br"] + ELECTRON_MASS,
+    # Multimers: same additive shift as their monomer counterpart; only the
+    # n-mer factor (ion_to_nmer) differs.
+    "[2M+H]+": ELEMENT_TO_MASS["H"] - ELECTRON_MASS,
+    "[2M+Na]+": ELEMENT_TO_MASS["Na"] - ELECTRON_MASS,
+    "[2M-H]-": -ELEMENT_TO_MASS["H"] + ELECTRON_MASS,
+    "[2M+HCOOH-H]-": ELEMENT_TO_MASS["C"]
+    + ELEMENT_TO_MASS["H"]
+    + 2 * ELEMENT_TO_MASS["O"]
+    + ELECTRON_MASS,
+    "[2M+CH3COOH-H]-": 2 * ELEMENT_TO_MASS["C"]
+    + 3 * ELEMENT_TO_MASS["H"]
+    + 2 * ELEMENT_TO_MASS["O"]
+    + ELECTRON_MASS,
 }
 
 ion_to_add_vec = {
@@ -163,7 +236,38 @@ ion_to_add_vec = {
     "[M+CH3COOH-H]-": 2 * element_to_position["C"]
     + 3 * element_to_position["H"]
     + 2 * element_to_position["O"],
+    "[M+Br]-": element_to_position["Br"],
+    # Multimers: same atom offset as their monomer counterpart. add_ion combines
+    # this with nmer * M to build the full charged-species formula.
+    "[2M+H]+": element_to_position["H"],
+    "[2M+Na]+": element_to_position["Na"],
+    "[2M-H]-": -element_to_position["H"],
+    "[2M+HCOOH-H]-": element_to_position["C"]
+    + element_to_position["H"]
+    + 2 * element_to_position["O"],
+    "[2M+CH3COOH-H]-": 2 * element_to_position["C"]
+    + 3 * element_to_position["H"]
+    + 2 * element_to_position["O"],
 }
+
+assert set(ion_to_mass) == set(ION_LST) == set(ion_to_add_vec), (
+    "ion_to_mass / ion_to_add_vec must cover exactly ION_LST"
+)
+
+
+def precursor_mz_to_neutral_mass(precursor_mz, ion):
+    """Neutral *monomer* mass from an observed precursor m/z.
+
+    Inverts ``precursor_mz = nmer * neutral_mass + ion_to_mass[ion]`` (charge is
+    assumed 1 for every adduct in ION_LST). Accepts scalars or numpy arrays.
+    """
+    return (precursor_mz - ion_to_mass[ion]) / ion_to_nmer[ion]
+
+
+def neutral_mass_to_precursor_mz(neutral_mass, ion):
+    """Expected precursor m/z for a neutral *monomer* mass under ``ion``."""
+    return ion_to_nmer[ion] * neutral_mass + ion_to_mass[ion]
+
 
 instrument_to_type = {
     "Thermo Finnigan Velos Orbitrap": "orbitrap",
@@ -364,11 +468,11 @@ def norm_mass_diff_ppm(mass_diff):
 
 
 def get_cls_mass_diff(parentmass, form, ion):
-    # `ion_to_mass[ion]` already incorporates the electron mass with the correct
-    # sign (−ELECTRON_MASS for positive ions, +ELECTRON_MASS for negative), so
-    # the result is directly the theoretical m/z of the charged species. No
-    # additional electron_correct is needed; applying it would bias by ~2 ppm.
-    true_val = formula_mass(form) + ion_to_mass[ion]
+    # neutral_mass_to_precursor_mz folds in the n-mer factor and the adduct mass
+    # shift (which already carries the electron-mass sign: −ELECTRON_MASS for
+    # positive ions, +ELECTRON_MASS for negative), giving the theoretical
+    # precursor m/z directly. No extra electron_correct (that would bias ~2 ppm).
+    true_val = neutral_mass_to_precursor_mz(formula_mass(form), ion)
     return abs(parentmass - true_val)
 
 
@@ -446,9 +550,10 @@ def ion_mode_from_adduct(adduct: str) -> str:
 
 
 def add_ion(form, ion):
+    """Full charged-species formula for ``ion``: nmer * M + adduct atoms."""
     ion_vec = ion_to_add_vec[ion]
     form_vec = formula_to_dense(form)
-    return vec_to_formula(form_vec + ion_vec)
+    return vec_to_formula(ion_to_nmer[ion] * form_vec + ion_vec)
 
 
 def form_from_smi(smi):

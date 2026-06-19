@@ -56,6 +56,15 @@ def get_args():
         "(true form NOT excluded); true survives iff the deployment pipeline "
         "would have kept it.",
     )
+    parser.add_argument(
+        "--adducts",
+        type=str,
+        default=None,
+        help="Comma-separated adducts to consider as candidates, restricting the "
+        "candidate universe (e.g. '[M+H]+,[M+Na]+' for a MassSpecGym model that "
+        "only saw those). Each must be in common.ION_LST (aliases are normalized). "
+        "Default: every adduct of each spectrum's ion mode.",
+    )
     return parser.parse_args()
 
 
@@ -73,8 +82,10 @@ def sample_decoys(
 ):
     decoy_ion_lst = np.array(decoy_ion_lst)
     adduct_masses = np.array([common.ion_to_mass[i] for i in decoy_ions])
+    nmers = np.array([common.ion_to_nmer[i] for i in decoy_ions])
     form_masses = np.array([common.formula_mass(i) for i in decoy_ion_lst])
-    decoy_masses = form_masses + adduct_masses
+    # Predicted precursor m/z of each candidate (nmer * M + adduct shift).
+    decoy_masses = nmers * form_masses + adduct_masses
     decoy_ppm = (
         common.clipped_ppm(
             np.abs(parentmass - decoy_masses), np.ones_like(decoy_masses) * parentmass
@@ -163,6 +174,26 @@ def main():
     )
     elements = args.elements
 
+    # Optional restriction of the candidate adduct universe (request: let a model
+    # consider only a user-chosen adduct set). None => all adducts of each mode.
+    allowed_ions = None
+    if args.adducts is not None:
+        allowed_ions = set()
+        for raw in args.adducts.split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            canon = common.ion_remap.get(raw, raw)
+            if canon not in common.ION_LST:
+                raise SystemExit(
+                    f"--adducts: '{raw}' is not a recognized adduct. "
+                    f"Valid (canonical): {common.ION_LST}"
+                )
+            allowed_ions.add(canon)
+        if not allowed_ions:
+            raise SystemExit("--adducts was empty after parsing")
+        print(f"Restricting candidate adducts to: {sorted(allowed_ions)}")
+
     fast_model_path = args.fast_model
     if fast_model_path is not None:
         fast_model_obj = fast_form_model.FastFFN.load_from_checkpoint(fast_model_path)
@@ -181,8 +212,10 @@ def main():
     specs = df["spec"].to_list()
     true_formulae = df["formula"].to_list()
     true_ionizations = df["ionization"].to_list()
+    # Predicted precursor m/z of the true (formula, ion); folds in the n-mer
+    # factor so [2M+...] precursors are placed correctly.
     true_masses = [
-        (common.formula_mass(true_form) + common.ion_to_mass[true_ion])
+        common.neutral_mass_to_precursor_mz(common.formula_mass(true_form), true_ion)
         for true_form, true_ion in zip(true_formulae, true_ionizations, strict=False)
     ]
 
@@ -246,7 +279,15 @@ def main():
         mode_specs = specs_arr[mask]
         mode_pmz = precursor_mz_arr[mask]
         for ion in ion_subset:
-            decoy_masses = [(pm - common.ion_to_mass[ion]) for pm in mode_pmz]
+            # Optionally restrict the candidate adduct universe (e.g. a model
+            # trained only on [M+H]+/[M+Na]+ should consider only those).
+            if allowed_ions is not None and ion not in allowed_ions:
+                continue
+            # Neutral *monomer* mass for SIRIUS; divides out the n-mer factor so
+            # [2M+...] candidates decompose the correct monomer mass.
+            decoy_masses = [
+                common.precursor_mz_to_neutral_mass(pm, ion) for pm in mode_pmz
+            ]
             decoy_masses = decomp.get_rounded_masses(decoy_masses)
             for spec, mass in zip(mode_specs, decoy_masses, strict=False):
                 spec_to_ion_masses[spec].append((ion, mass))
