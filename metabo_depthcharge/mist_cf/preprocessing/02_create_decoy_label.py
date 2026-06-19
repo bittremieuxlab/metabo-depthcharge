@@ -6,6 +6,7 @@ Take the original labels file and generate decoy file using SIRIUS decomp.
 
 import argparse
 import hashlib
+import re
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -208,6 +209,36 @@ def main():
         df = df.drop(columns=["name"])
     if debug:
         df = df[:100]
+
+    # Drop labels whose true formula contains an element outside the alphabet we
+    # decompose into. Those spectra are unrecoverable (SIRIUS never proposes such
+    # a formula, the model has no output dimension for it) and would otherwise
+    # crash formula_mass with a KeyError on the unknown element (e.g. Sn).
+    el_str = elements if elements is not None else decomp.EL_STR_DEFAULT
+    allowed_elements = set(re.findall(r"([A-Z][a-z]*)\[", el_str))
+
+    def formula_in_alphabet(formula):
+        return all(
+            sym in allowed_elements
+            for sym, _ in re.findall(common.CHEM_FORMULA_SIZE, formula)
+        )
+
+    in_alphabet = df["formula"].map(formula_in_alphabet)
+    n_dropped = int((~in_alphabet).sum())
+    if n_dropped:
+        dropped_elements = sorted(
+            {
+                sym
+                for formula in df.loc[~in_alphabet, "formula"]
+                for sym, _ in re.findall(common.CHEM_FORMULA_SIZE, formula)
+                if sym not in allowed_elements
+            }
+        )
+        print(
+            f"Dropping {n_dropped}/{len(df)} labels whose true formula has elements "
+            f"outside the alphabet {sorted(allowed_elements)}: {dropped_elements}"
+        )
+        df = df[in_alphabet].reset_index(drop=True)
 
     specs = df["spec"].to_list()
     true_formulae = df["formula"].to_list()
