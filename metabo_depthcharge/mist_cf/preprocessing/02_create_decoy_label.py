@@ -66,6 +66,13 @@ def get_args():
         "only saw those). Each must be in common.ION_LST (aliases are normalized). "
         "Default: every adduct of each spectrum's ion mode.",
     )
+    parser.add_argument(
+        "--gpu",
+        action="store_true",
+        default=False,
+        help="Run the fast-filter model on CUDA instead of CPU. Only affects the "
+        "fast_filter sample strategy; no effect without --fast-model.",
+    )
     return parser.parse_args()
 
 
@@ -200,7 +207,12 @@ def main():
         fast_model_obj = fast_form_model.FastFFN.load_from_checkpoint(fast_model_path)
     else:
         fast_model_obj = None
-    device = torch.device("cpu")
+    if args.gpu:
+        if not torch.cuda.is_available():
+            raise SystemExit("--gpu was set but torch.cuda.is_available() is False")
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
 
     np.random.seed(seed)
 
