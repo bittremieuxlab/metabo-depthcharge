@@ -45,7 +45,11 @@ Metadata parsing
 
    encode_instrument
    encode_collision_energy
+   encode_ion_activation
+   encode_ionization_method
    INSTRUMENT_TYPES
+   ION_ACTIVATION_METHODS
+   IONIZATION_METHODS
    METADATA_FIELDS
    METADATA_PARSERS
 
