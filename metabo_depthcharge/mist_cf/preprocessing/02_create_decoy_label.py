@@ -358,6 +358,42 @@ def main():
     mass_to_formulas.update(out_dict)
     del out_dict
 
+    # The fast filter score is a pure function of the candidate FORMULA: the
+    # model never sees the spectrum or the adduct (FastFFN.forward consumes only
+    # the formula's element-count embedding). The original code re-embedded and
+    # re-scored the same formulae once per spectrum, so a formula shared by N
+    # specs/ions was scored N times — the dominant cost for large inputs, none
+    # of which the GPU helps with. Instead, score every unique formula ONCE here
+    # and reuse the scores via a {formula: score} lookup in filter_spec_entries.
+    # Output is byte-identical: the per-spec path consumes the exact same
+    # per-formula scores (the MLP has no batch-coupled layers, so a formula's
+    # score is independent of how candidates are batched), then argsorts them
+    # in the unchanged candidate order.
+    formula_to_score = None
+    if sample_strat == "fast_filter" and fast_model_obj is not None:
+        unique_forms = np.array(
+            sorted({f for forms in mass_to_formulas.values() for f in forms}),
+            dtype=object,
+        )
+        print(
+            f"Fast-filter: scoring {len(unique_forms)} unique candidate formulae "
+            f"once (reused across all spectra)..."
+        )
+        formula_to_score = {}
+        # Chunk so the transient embedding list + DataFrame inside
+        # fast_filter_score stays bounded for very large formula universes.
+        # GPU memory is bounded by the DataLoader batch_size (batches are
+        # streamed to device inside fast_filter_score), NOT by the chunk size,
+        # so the chunk only caps host RAM. batch_size is kept at the original
+        # per-spec value (1024) so the model math is unchanged.
+        score_chunk = 1_000_000
+        for start in range(0, len(unique_forms), score_chunk):
+            chunk = unique_forms[start : start + score_chunk]
+            chunk_scores = fast_model_obj.fast_filter_score(
+                "global", chunk, chunk, device, batch_size=1024
+            )
+            formula_to_score.update(zip(chunk, chunk_scores, strict=False))
+
     # Build reference counts so we can free mass entries after consumption.
     # Dedup within a spec: a mass is freed once all specs referencing it are done.
     mass_refcount = defaultdict(int)
@@ -380,24 +416,18 @@ def main():
             ions_all = np.array([], dtype=object)
             cands_all = np.array([], dtype=object)
 
-        # For fast_filter: score the FULL union once via NN, then reuse scores
-        # for both the training-decoy path and the pred-candidate path. The
-        # fast filter is a pure function of (spec, cand_form, cand_ion), so
-        # scores for any subset equal the corresponding entries of the
-        # full-set scores — training output stays byte-identical, but we
-        # avoid a second NN forward pass (and a second tqdm bar) per spec.
+        # For fast_filter: reuse the globally-precomputed per-formula scores for
+        # both the training-decoy path and the pred-candidate path. The fast
+        # filter is a pure function of cand_form (not spec or ion), so scores for
+        # any subset are just the corresponding entries of the global table — no
+        # per-spec NN forward pass (and no per-spec tqdm bar) is needed.
         scores_all = None
-        if (
-            sample_strat == "fast_filter"
-            and fast_model_obj is not None
-            and len(cands_all) > 0
-        ):
-            scores_all = fast_model_obj.fast_filter_score(
-                spec,
-                cands_all,
-                ions_all,
-                device,
-                batch_size=1024,
+        if formula_to_score is not None and len(cands_all) > 0:
+            # Look up the globally-computed per-formula scores instead of
+            # re-running the NN per spec. Same values, same candidate order, so
+            # the downstream argsort/top-k selection is byte-identical.
+            scores_all = np.array(
+                [formula_to_score[f] for f in cands_all], dtype=np.float32
             )
 
         # --- Training decoy path (true form excluded before sampling). ---
