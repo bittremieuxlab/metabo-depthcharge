@@ -11,7 +11,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, DataStructs
 from transformers import AutoModel, AutoTokenizer
 
-from metabo_depthcharge.chem.molecule import Molecule
+from metabo_depthcharge.chem.molecule import Molecule, _lenient_mol_from_smiles
 
 
 def _batched(fn):
@@ -189,7 +189,9 @@ class MoleculeToMAP4:
             ``(rep_size,)`` for a single molecule, or ``(N, rep_size)`` for an
             iterable of ``N`` molecules.
         """
-        return self.map_calc.calculate(mol.mol)
+        return self.map_calc.calculate(
+            _lenient_mol_from_smiles(mol.canonical_smiles)
+        )
 
 
 class _HFEmbedder:
