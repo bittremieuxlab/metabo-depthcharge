@@ -189,9 +189,10 @@ class MoleculeToMAP4:
             ``(rep_size,)`` for a single molecule, or ``(N, rep_size)`` for an
             iterable of ``N`` molecules.
         """
-        return self.map_calc.calculate(
-            _lenient_mol_from_smiles(mol.canonical_smiles)
-        )
+        # MAP4 shingles inherit the parsed mol's kekulization state, so re-parse
+        # from the canonical SMILES (via the same helper Molecule.mol uses) to
+        # keep the fingerprint invariant to the input SMILES dialect.
+        return self.map_calc.calculate(_lenient_mol_from_smiles(mol.canonical_smiles))
 
 
 class _HFEmbedder:
