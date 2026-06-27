@@ -6,6 +6,8 @@ Take the original labels file and generate decoy file using SIRIUS decomp.
 
 import argparse
 import hashlib
+import multiprocessing as mp
+import os
 import re
 import time
 from collections import defaultdict
@@ -14,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from tqdm import tqdm
 
 from .. import common, decomp
 from ..fast_form_score import fast_form_model
@@ -162,6 +165,126 @@ def resample_precursor_fn(true_masses, errors):
         rel_mass_diff = common.clipped_ppm(abs_mass_diff, true_masses)
         within_error_thresh = rel_mass_diff <= errors
     return new_masses
+
+
+def _spec_seed(spec, seed, salt=0):
+    # Deterministic per-spectrum RNG seed so sampling is reproducible and
+    # independent of processing order (required once the per-spec loop is
+    # parallelized — workers no longer share one sequential global RNG). salt=0
+    # reproduces the original pred-path seed exactly, so the pred-candidate file
+    # stays byte-identical.
+    h = int.from_bytes(hashlib.md5(str(spec).encode("utf-8")).digest()[:4], "big")
+    return (seed ^ h ^ salt) & 0x7FFFFFFF
+
+
+def filter_spec_entries(
+    spec,
+    ion_masses,
+    *,
+    mass_to_formulas,
+    formula_to_score,
+    spec2form,
+    spec2parentmass,
+    max_decoy,
+    max_pred_candidates,
+    sample_strat,
+    softmax_temperature,
+    seed,
+    fast_model=None,
+    device=None,
+):
+    # Pair each formula only with the ion that actually produced its mass
+    # for THIS spec — no cross-spec ion leakage.
+    dict_entry = set()
+    for ion, mass in ion_masses:
+        forms = mass_to_formulas.get(mass, [])
+        dict_entry.update((ion, f) for f in forms)
+    if len(dict_entry) > 0:
+        ions_all, cands_all = zip(*dict_entry, strict=False)
+        ions_all = np.array(ions_all)
+        cands_all = np.array(cands_all)
+    else:
+        ions_all = np.array([], dtype=object)
+        cands_all = np.array([], dtype=object)
+
+    # Reuse the globally-precomputed per-formula scores (the fast filter is a
+    # pure function of cand_form, not spec/ion) instead of re-running the NN.
+    scores_all = None
+    if formula_to_score is not None and len(cands_all) > 0:
+        scores_all = np.array(
+            [formula_to_score[f] for f in cands_all], dtype=np.float32
+        )
+
+    # --- Training decoy path (true form excluded before sampling). ---
+    inds = cands_all != spec2form[spec]
+    cands = cands_all[inds]
+    ions = ions_all[inds]
+    was_found = np.sum(~inds) > 0
+
+    if len(cands) < max_decoy:
+        pass
+    else:
+        # Per-spec deterministic RNG -> order-independent under parallelism.
+        # Only reached when sampling actually triggers; with the default
+        # max_decoy this branch never runs and the training output is unchanged.
+        np.random.seed(_spec_seed(spec, seed, salt=0x5EED))
+        cand_inds = sample_decoys(
+            spec,
+            cands,
+            ions,
+            spec2parentmass[spec],
+            max_decoy,
+            sample_strat,
+            softmax_temperature,
+            fast_model=fast_model,
+            device=device,
+            precomputed_scores=(scores_all[inds] if scores_all is not None else None),
+        )
+        ions = ions[cand_inds]
+        cands = cands[cand_inds]
+
+    # --- Honest pred-candidate path (true form NOT excluded). ---
+    # Sample on the full SIRIUS union; true survives only if the real deployment
+    # pipeline would have kept it.
+    if len(cands_all) <= max_pred_candidates:
+        pred_ions = ions_all
+        pred_cands = cands_all
+    else:
+        np.random.seed(_spec_seed(spec, seed, salt=0))
+        pred_inds = sample_decoys(
+            spec,
+            cands_all,
+            ions_all,
+            spec2parentmass[spec],
+            max_pred_candidates,
+            sample_strat,
+            softmax_temperature,
+            fast_model=fast_model,
+            device=device,
+            precomputed_scores=scores_all,
+        )
+        pred_ions = ions_all[pred_inds]
+        pred_cands = cands_all[pred_inds]
+
+    return {
+        "spec": spec,
+        "was_found": was_found,
+        "out_ions": ions,
+        "out_cands": cands,
+        "pred_ions": pred_ions,
+        "pred_cands": pred_cands,
+    }
+
+
+# Read-only context shared with worker processes via copy-on-write fork
+# inheritance (Linux). Populated in main() BEFORE the pool is created so the
+# large tables (mass_to_formulas, formula_to_score) are never pickled to workers.
+_WORKER_CTX = {}
+
+
+def _filter_spec_entries_worker(item):
+    spec, ion_masses = item
+    return filter_spec_entries(spec, ion_masses, **_WORKER_CTX)
 
 
 def main():
@@ -394,125 +517,58 @@ def main():
             )
             formula_to_score.update(zip(chunk, chunk_scores, strict=False))
 
-    # Build reference counts so we can free mass entries after consumption.
-    # Dedup within a spec: a mass is freed once all specs referencing it are done.
-    mass_refcount = defaultdict(int)
-    for ion_masses in spec_to_ion_masses.values():
-        for mass in {m for _, m in ion_masses}:
-            mass_refcount[mass] += 1
+    # Build the per-spectrum candidate sets. This phase is pure-Python (set
+    # building + per-candidate score lookups) and was the remaining single-core
+    # bottleneck after the fast filter was vectorized, so fan it out across
+    # processes. On Linux, fork lets workers read the large mass_to_formulas /
+    # formula_to_score tables via copy-on-write without pickling them.
+    ctx_kwargs = dict(
+        mass_to_formulas=mass_to_formulas,
+        formula_to_score=formula_to_score,
+        spec2form=spec2form,
+        spec2parentmass=spec2parentmass,
+        max_decoy=max_decoy,
+        max_pred_candidates=max_pred_candidates,
+        sample_strat=sample_strat,
+        softmax_temperature=softmax_temperature,
+        seed=seed,
+    )
 
-    def filter_spec_entries(spec, ion_masses):
-        # Pair each formula only with the ion that actually produced its mass
-        # for THIS spec — no cross-spec ion leakage.
-        dict_entry = set()
-        for ion, mass in ion_masses:
-            forms = mass_to_formulas.get(mass, [])
-            dict_entry.update((ion, f) for f in forms)
-        if len(dict_entry) > 0:
-            ions_all, cands_all = zip(*dict_entry, strict=False)
-            ions_all = np.array(ions_all)
-            cands_all = np.array(cands_all)
-        else:
-            ions_all = np.array([], dtype=object)
-            cands_all = np.array([], dtype=object)
+    items = list(spec_to_ion_masses.items())
+    n_proc = num_workers if num_workers and num_workers > 1 else (os.cpu_count() or 1)
+    n_proc = min(n_proc, max(1, len(items)))
 
-        # For fast_filter: reuse the globally-precomputed per-formula scores for
-        # both the training-decoy path and the pred-candidate path. The fast
-        # filter is a pure function of cand_form (not spec or ion), so scores for
-        # any subset are just the corresponding entries of the global table — no
-        # per-spec NN forward pass (and no per-spec tqdm bar) is needed.
-        scores_all = None
-        if formula_to_score is not None and len(cands_all) > 0:
-            # Look up the globally-computed per-formula scores instead of
-            # re-running the NN per spec. Same values, same candidate order, so
-            # the downstream argsort/top-k selection is byte-identical.
-            scores_all = np.array(
-                [formula_to_score[f] for f in cands_all], dtype=np.float32
+    if n_proc > 1:
+        # Workers never need the NN: every candidate score was precomputed above
+        # and is passed via precomputed_scores, so hand them fast_model=None and
+        # avoid forking a live CUDA context into the children.
+        _WORKER_CTX.clear()
+        _WORKER_CTX.update(ctx_kwargs)
+        _WORKER_CTX["fast_model"] = None
+        _WORKER_CTX["device"] = None
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        print(f"Building candidate sets per spectrum across {n_proc} processes...")
+        chunksize = max(1, len(items) // (n_proc * 8))
+        with mp.get_context("fork").Pool(n_proc) as pool:
+            output_dicts = list(
+                tqdm(
+                    pool.imap(_filter_spec_entries_worker, items, chunksize=chunksize),
+                    total=len(items),
+                    desc="Candidate sets",
+                )
             )
-
-        # --- Training decoy path (true form excluded before sampling). ---
-        # This branch must consume np.random in EXACTLY the same way as the
-        # original implementation so that decoy_label_*.tsv is byte-identical
-        # to a pre-pred-candidates run of this script.
-        inds = cands_all != spec2form[spec]
-        cands = cands_all[inds]
-        ions = ions_all[inds]
-        was_found = np.sum(~inds) > 0
-
-        if len(cands) < max_decoy:
-            pass
-        else:
-            cand_inds = sample_decoys(
+    else:
+        output_dicts = [
+            filter_spec_entries(
                 spec,
-                cands,
-                ions,
-                spec2parentmass[spec],
-                max_decoy,
-                sample_strat,
-                softmax_temperature,
+                ion_masses,
                 fast_model=fast_model_obj,
                 device=device,
-                precomputed_scores=(
-                    scores_all[inds] if scores_all is not None else None
-                ),
+                **ctx_kwargs,
             )
-            ions = ions[cand_inds]
-            cands = cands[cand_inds]
-
-        # --- Honest pred-candidate path (true form NOT excluded). ---
-        # Sample on the full SIRIUS union; true survives only if the real
-        # deployment pipeline would have kept it. The training RNG state is
-        # saved and restored around this call so the training output above
-        # stays byte-identical regardless of sampler strategy.
-        if len(cands_all) <= max_pred_candidates:
-            pred_ions = ions_all
-            pred_cands = cands_all
-        else:
-            _saved_rng_state = np.random.get_state()
-            _pred_seed = (
-                seed
-                ^ int.from_bytes(
-                    hashlib.md5(str(spec).encode("utf-8")).digest()[:4], "big"
-                )
-            ) & 0x7FFFFFFF
-            np.random.seed(_pred_seed)
-            try:
-                pred_inds = sample_decoys(
-                    spec,
-                    cands_all,
-                    ions_all,
-                    spec2parentmass[spec],
-                    max_pred_candidates,
-                    sample_strat,
-                    softmax_temperature,
-                    fast_model=fast_model_obj,
-                    device=device,
-                    precomputed_scores=scores_all,
-                )
-            finally:
-                np.random.set_state(_saved_rng_state)
-            pred_ions = ions_all[pred_inds]
-            pred_cands = cands_all[pred_inds]
-
-        # Decrement refcounts and free mass entries no longer needed.
-        for mass in {m for _, m in ion_masses}:
-            mass_refcount[mass] -= 1
-            if mass_refcount[mass] == 0:
-                mass_to_formulas.pop(mass, None)
-                del mass_refcount[mass]
-
-        return {
-            "spec": spec,
-            "was_found": was_found,
-            "out_ions": ions,
-            "out_cands": cands,
-            "pred_ions": pred_ions,
-            "pred_cands": pred_cands,
-        }
-
-    output_dicts = []
-    for spec, ion_masses in spec_to_ion_masses.items():
-        output_dicts.append(filter_spec_entries(spec, ion_masses))
+            for spec, ion_masses in tqdm(items, desc="Candidate sets")
+        ]
     for out_dict in output_dicts:
         spec = out_dict["spec"]
         cands = out_dict["out_cands"]
@@ -556,36 +612,42 @@ def main():
     # (SIRIUS decomp + sampler, true form NOT pre-excluded). The true pair
     # appears iff it would have been kept in practice; specs whose true pair
     # was dropped are recorded without it — the realistic failure mode.
-    pred_rows = []
+    # Build the pred-candidate table by concatenating per-spec arrays instead of
+    # appending one Python dict per (spec, candidate). That dict loop was a
+    # second single-core hotspot — there can be hundreds of millions of rows.
     pipeline_recover = {}
-    for out_dict in output_dicts:
+    spec_cols, cand_cols, ion_cols, pm_cols, instr_cols = [], [], [], [], []
+    for out_dict in tqdm(output_dicts, desc="Pred candidates"):
         spec = out_dict["spec"]
-        pcands = out_dict["pred_cands"]
-        pions = out_dict["pred_ions"]
-        pm = spec2parentmass[spec]
-        instr = spec2instrument[spec]
-        tf = spec2form[spec]
-        ti = spec2ion[spec]
-        has_true = False
-        for ion, cand in zip(pions, pcands, strict=False):
-            cand_s = str(cand)
-            ion_s = str(ion)
-            if cand_s == tf and ion_s == ti:
-                has_true = True
-            pred_rows.append(
-                {
-                    "spec": spec,
-                    "cand_form": cand_s,
-                    "cand_ion": ion_s,
-                    "parentmass": pm,
-                    "instrument": instr,
-                }
-            )
-        pipeline_recover[spec] = has_true
+        pcands = np.asarray(out_dict["pred_cands"], dtype=object)
+        pions = np.asarray(out_dict["pred_ions"], dtype=object)
+        n = len(pcands)
+        pipeline_recover[spec] = (
+            bool(np.any((pcands == spec2form[spec]) & (pions == spec2ion[spec])))
+            if n
+            else False
+        )
+        if n == 0:
+            continue
+        spec_cols.append(np.full(n, spec, dtype=object))
+        cand_cols.append(pcands)
+        ion_cols.append(pions)
+        pm_cols.append(np.full(n, spec2parentmass[spec]))
+        instr_cols.append(np.full(n, spec2instrument[spec], dtype=object))
 
-    pred_df = pd.DataFrame(
-        pred_rows, columns=["spec", "cand_form", "cand_ion", "parentmass", "instrument"]
-    )
+    pred_cols = ["spec", "cand_form", "cand_ion", "parentmass", "instrument"]
+    if spec_cols:
+        pred_df = pd.DataFrame(
+            {
+                "spec": np.concatenate(spec_cols),
+                "cand_form": np.concatenate(cand_cols),
+                "cand_ion": np.concatenate(ion_cols),
+                "parentmass": np.concatenate(pm_cols),
+                "instrument": np.concatenate(instr_cols),
+            }
+        )
+    else:
+        pred_df = pd.DataFrame(columns=pred_cols)
     pred_path = save_dir / f"pred_candidates_{decoy_suffix}.tsv"
     print(f"Save to {pred_path}")
     pred_df.to_csv(pred_path, sep="\t", index=None)
