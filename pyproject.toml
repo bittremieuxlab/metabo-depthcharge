@@ -16,6 +16,7 @@ dependencies = [
     "pandas>=2.0.0",
     "rdkit>=2023.9.0",
     "myopic_mces>=1.0.0,<2.0.0",
+    "highspy>=1.5.0",
     "datasets>=2.14.0",
     "pyteomics>=4.6",
     "biosynfoni>=1.0.0",

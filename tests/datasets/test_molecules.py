@@ -39,7 +39,9 @@ def test_from_csv_preserves_extra_columns(tmp_path):
     assert ds[0]["label"].item() == 1
 
 
-def test_unknown_property_raises(tiny_tsv):
+def test__raises(tiny_tsv):
+    with pytest.raises(TypeError):
+        MoleculeDataset()
     with pytest.raises(ValueError, match="Unknown property"):
         MoleculeDataset.from_csv(tiny_tsv, sep="\t", properties=["bogus"])
 

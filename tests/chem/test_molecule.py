@@ -1,17 +1,10 @@
-"""Tests for :mod:`metabo_depthcharge.chem` — the :class:`Molecule` wrapper
-and the molecule-to-vector representation classes."""
+"""Tests for :class:`metabo_depthcharge.chem.molecule.Molecule` — the
+RDKit-backed molecule wrapper, its derived properties, equality semantics,
+``from_dict`` construction and ``standardize``."""
 
-import numpy as np
 import pytest
 
-from metabo_depthcharge.chem import (
-    Molecule,
-    MoleculeToBiosynfoni,
-    MoleculeToMACCS,
-    MoleculeToMAP4,
-    MoleculeToMorgan,
-    MoleculeToRdkit,
-)
+from metabo_depthcharge.chem import Molecule
 from metabo_depthcharge.chem.molecule import PROPERTIES
 
 
@@ -172,7 +165,7 @@ def test_from_dict_bypasses_parsing_when_all_props_present():
 
 
 def test_standardize_returns_new_molecule(aspirin):
-    out = Molecule(aspirin).standardize()
+    out = Molecule(aspirin).standardize(canonicalize_tautomers=True)
     assert isinstance(out, Molecule)
     assert out is not None
 
@@ -221,124 +214,3 @@ def test_standardize_failure_returns_none_without_mutating():
     m = Molecule(bad)
     assert m.standardize() is None
     assert m.smiles == bad
-
-
-# --- Representations: MoleculeToMorgan -----------------------------------
-
-
-def test_morgan_single_shape(aspirin_mol):
-    assert MoleculeToMorgan()(aspirin_mol).shape == (4096,)
-
-
-def test_morgan_custom_rep_size(aspirin_mol):
-    enc = MoleculeToMorgan(rep_size=2048)
-    assert enc(aspirin_mol).shape == (2048,)
-    assert enc.rep_size == 2048
-
-
-def test_morgan_batch_stacks(aspirin_mol, caffeine):
-    fps = MoleculeToMorgan()([aspirin_mol, Molecule(caffeine)])
-    assert fps.shape == (2, 4096)
-
-
-def test_morgan_binary_values(aspirin_mol):
-    rep = MoleculeToMorgan()(aspirin_mol)
-    assert set(np.unique(rep)).issubset({0, 1})
-
-
-def test_morgan_counts_nonnegative(aspirin_mol):
-    rep = MoleculeToMorgan(counts=True)(aspirin_mol)
-    assert (rep >= 0).all()
-
-
-def test_morgan_distinguishes_molecules(aspirin_mol, caffeine):
-    enc = MoleculeToMorgan()
-    assert not np.array_equal(enc(aspirin_mol), enc(Molecule(caffeine)))
-
-
-# --- Representations: MoleculeToRdkit ------------------------------------
-
-
-def test_rdkit_single_shape(aspirin_mol):
-    assert MoleculeToRdkit()(aspirin_mol).shape == (4096,)
-
-
-def test_rdkit_batch(aspirin_mol, caffeine):
-    fps = MoleculeToRdkit()([aspirin_mol, Molecule(caffeine)])
-    assert fps.shape == (2, 4096)
-
-
-def test_rdkit_binary(aspirin_mol):
-    rep = MoleculeToRdkit()(aspirin_mol)
-    assert set(np.unique(rep)).issubset({0, 1})
-
-
-# --- Representations: MoleculeToMACCS ------------------------------------
-
-
-def test_maccs_rep_size_constant(aspirin_mol):
-    enc = MoleculeToMACCS()
-    assert enc.rep_size == 167
-    assert enc(aspirin_mol).shape == (167,)
-
-
-def test_maccs_batch(aspirin_mol, caffeine):
-    fps = MoleculeToMACCS()([aspirin_mol, Molecule(caffeine)])
-    assert fps.shape == (2, 167)
-
-
-def test_maccs_binary(aspirin_mol):
-    rep = MoleculeToMACCS()(aspirin_mol)
-    assert set(np.unique(rep)).issubset({0, 1})
-
-
-# --- Representations: MoleculeToBiosynfoni -------------------------------
-
-
-def test_biosynfoni_rep_size_constant(aspirin_mol):
-    enc = MoleculeToBiosynfoni()
-    assert enc.rep_size == 39
-    assert enc(aspirin_mol).shape == (39,)
-
-
-def test_biosynfoni_batch(aspirin_mol, caffeine):
-    fps = MoleculeToBiosynfoni()([aspirin_mol, Molecule(caffeine)])
-    assert fps.shape == (2, 39)
-
-
-# --- Representations: MoleculeToMAP4 -------------------------------------
-
-
-def test_map4_single_shape(aspirin_mol):
-    assert MoleculeToMAP4()(aspirin_mol).shape == (4096,)
-
-
-def test_map4_custom_rep_size(aspirin_mol):
-    enc = MoleculeToMAP4(rep_size=1024)
-    assert enc(aspirin_mol).shape == (1024,)
-    assert enc.rep_size == 1024
-
-
-def test_map4_batch(aspirin_mol, caffeine):
-    fps = MoleculeToMAP4()([aspirin_mol, Molecule(caffeine)])
-    assert fps.shape == (2, 4096)
-
-
-def test_map4_binary_values(aspirin_mol):
-    # Verified empirically in the package: this library folds MinHash
-    # signatures into a binary indicator vector.
-    rep = MoleculeToMAP4()(aspirin_mol)
-    assert set(np.unique(rep)).issubset({0, 1})
-
-
-# --- Neural representations (import-only smoke) --------------------------
-
-
-def test_molformer_import():
-    pytest.importorskip("transformers")
-    from metabo_depthcharge.chem import MoleculeToMolFormer  # noqa: F401
-
-
-def test_chemberta_import():
-    pytest.importorskip("transformers")
-    from metabo_depthcharge.chem import MoleculeToChemBERTa  # noqa: F401

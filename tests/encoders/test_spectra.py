@@ -1,4 +1,6 @@
-"""Standalone tests for metabo_depthcharge.encoders and .data.metadata."""
+"""Tests for :mod:`metabo_depthcharge.encoders.spectra` — the spectrum-side
+encoders (:class:`MetadataEncoder`, :class:`PeakEncoder`,
+:class:`SpectrumEncoder`)."""
 
 import pytest
 
@@ -6,54 +8,12 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from metabo_depthcharge.encoders import (  # noqa: E402
-    AttnAggregator,
     MetadataEncoder,
-    MolMLP,
-    MultiMolMLP,
     PeakEncoder,
-    ResidualNetwork,
     SpectrumEncoder,
+    SubformulaEncoder,
 )
-from metabo_depthcharge.spec.metadata_parsers import (  # noqa: E402
-    encode_ion_activation,
-    encode_ionization_method,
-)
-
-
-# ---------------------------------------------------------------------------
-# encode_ion_activation / encode_ionization_method
-# ---------------------------------------------------------------------------
-
-
-def test_encode_ion_activation_known():
-    assert encode_ion_activation("HCD") == 1
-    assert encode_ion_activation("CID") == 2
-
-
-def test_encode_ion_activation_unknown():
-    assert encode_ion_activation("") == 0
-    assert encode_ion_activation(None) == 0
-    assert encode_ion_activation("UNKNOWN") == 0
-
-
-def test_encode_ion_activation_case_insensitive():
-    assert encode_ion_activation("hcd") == encode_ion_activation("HCD")
-
-
-def test_encode_ionization_method_known():
-    assert encode_ionization_method("NSI") == 1
-    assert encode_ionization_method("ESI") == 2
-    assert encode_ionization_method("APCI") == 3
-
-
-def test_encode_ionization_method_unknown():
-    assert encode_ionization_method("") == 0
-    assert encode_ionization_method(None) == 0
-    assert encode_ionization_method("MALDI") == 0
-
-
-def test_encode_ionization_method_case_insensitive():
-    assert encode_ionization_method("esi") == encode_ionization_method("ESI")
+from metabo_depthcharge.mist_cf.common.chem_utils import ELEMENT_DIM  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +95,18 @@ def test_metadata_encoder_combined_fields():
     assert out.shape == (4, 32)
 
 
+def test_metadata_encoder_no_fields_raises():
+    with pytest.raises(ValueError, match="At least one metadata field"):
+        MetadataEncoder(d_model=16, metadata_fields=[])
+
+
+def test_metadata_encoder_forward_missing_all_fields_warns():
+    enc = MetadataEncoder(d_model=16, metadata_fields=["adduct"])
+    with pytest.warns(UserWarning, match="none were present"):
+        out = enc({})
+    assert out == 0
+
+
 def test_metadata_encoder_empty_metadata_returns_zeros():
     """Passing an empty dict when adduct field is registered → zeros."""
     enc = MetadataEncoder(d_model=16, metadata_fields=["adduct"])
@@ -156,139 +128,6 @@ def test_peak_encoder_output_shape():
     x = torch.rand(4, 10, 2)  # (B, L, 2)
     out = enc(x)
     assert out.shape == (4, 10, 32)
-
-
-# ---------------------------------------------------------------------------
-# AttnAggregator
-# ---------------------------------------------------------------------------
-
-
-def test_attn_aggregator_output_shape():
-    agg = AttnAggregator(hidden_dim=32)
-    x = torch.rand(4, 10, 32)  # (B, L, D)
-    out = agg(x)
-    assert out.shape == (4, 32)
-
-
-def test_attn_aggregator_with_mask():
-    """Mask second half of positions; output should still be finite."""
-    B, L, D = 3, 8, 16
-    agg = AttnAggregator(hidden_dim=D)
-    x = torch.rand(B, L, D)
-    mask = torch.zeros(B, L, dtype=torch.bool)
-    mask[:, L // 2 :] = True  # mask out last half
-    out = agg(x, mask=mask)
-    assert out.shape == (B, D)
-    assert torch.isfinite(out).all()
-
-
-def test_attn_aggregator_no_mask():
-    agg = AttnAggregator(hidden_dim=24)
-    x = torch.rand(2, 6, 24)
-    out = agg(x)
-    assert out.shape == (2, 24)
-
-
-# ---------------------------------------------------------------------------
-# ResidualNetwork
-# ---------------------------------------------------------------------------
-
-
-def test_residual_network_same_dim():
-    proj = ResidualNetwork(d_in=32, d_out=32, n_blocks=0)
-    x = torch.rand(4, 32)
-    out = proj(x)
-    assert out.shape == (4, 32)
-
-
-def test_residual_network_different_dim():
-    proj = ResidualNetwork(d_in=256, d_out=512, n_blocks=0)
-    x = torch.rand(4, 256)
-    out = proj(x)
-    assert out.shape == (4, 512)
-
-
-def test_residual_network_with_layers():
-    proj = ResidualNetwork(d_in=64, d_out=64, n_blocks=2)
-    x = torch.rand(4, 64)
-    out = proj(x)
-    assert out.shape == (4, 64)
-
-
-# ---------------------------------------------------------------------------
-# MolMLP
-# ---------------------------------------------------------------------------
-
-
-def test_mol_embedder_binary():
-    emb = MolMLP(rep_size=64, n_blocks=2, d_model=32, rep_type="binary")
-    x = torch.randint(0, 2, (4, 64)).float()
-    assert emb(x).shape == (4, 32)
-
-
-def test_mol_embedder_count():
-    max_c = torch.rand(64) * 5 + 1
-    emb = MolMLP(
-        rep_size=64, n_blocks=2, d_model=32, rep_type="count", max_counts=max_c
-    )
-    x = torch.randint(0, 5, (4, 64)).float()
-    assert emb(x).shape == (4, 32)
-
-
-def test_mol_embedder_dense():
-    emb = MolMLP(rep_size=64, n_blocks=2, d_model=32, rep_type="dense")
-    x = torch.randn(4, 64)
-    assert emb(x).shape == (4, 32)
-
-
-def test_mol_embedder_zero_blocks_identity():
-    # n_blocks=0 with rep_size == d_model is an exact pass-through (no final norm)
-    emb = MolMLP(rep_size=32, n_blocks=0, d_model=32, rep_type="binary")
-    x = torch.rand(4, 32)
-    out = emb(x)
-    assert out.shape == (4, 32)
-    assert torch.allclose(out, x)
-
-
-def test_mol_embedder_zero_blocks_projection():
-    # n_blocks=0 with rep_size != d_model is a single linear projection
-    emb = MolMLP(rep_size=64, n_blocks=0, d_model=32, rep_type="binary")
-    x = torch.rand(4, 64)
-    assert emb(x).shape == (4, 32)
-
-
-# ---------------------------------------------------------------------------
-# MultiMolMLP
-# ---------------------------------------------------------------------------
-
-
-def test_multi_mol_embedder_output_shape():
-    emb = MultiMolMLP(
-        rep_names=["fp1", "fp2"],
-        rep_sizes=[64, 32],
-        n_blocks=2,
-        d_model=32,
-    )
-    fps = {"fp1": torch.rand(4, 64), "fp2": torch.rand(4, 32)}
-    assert emb(fps).shape == (4, 32)
-
-
-def test_multi_mol_embedder_mixed_types():
-    max_c = torch.rand(64) * 5 + 1
-    emb = MultiMolMLP(
-        rep_names=["bin", "cnt", "dns"],
-        rep_sizes=[64, 64, 32],
-        n_blocks=2,
-        d_model=32,
-        rep_types=["binary", "count", "dense"],
-        max_counts={"cnt": max_c},
-    )
-    fps = {
-        "bin": torch.randint(0, 2, (3, 64)).float(),
-        "cnt": torch.randint(0, 5, (3, 64)).float(),
-        "dns": torch.randn(3, 32),
-    }
-    assert emb(fps).shape == (3, 32)
 
 
 # ---------------------------------------------------------------------------
@@ -360,4 +199,35 @@ def test_spectrum_encoder_with_metadata():
     meta = {"adduct": torch.ones(B, dtype=torch.long)}
     with torch.no_grad():
         out = enc(mz, intensity, precursor_mz, metadata=meta)
+    assert out.shape == (B, D_MODEL)
+
+
+# ---------------------------------------------------------------------------
+# SubformulaEncoder
+# ---------------------------------------------------------------------------
+
+
+def test_subformula_encoder_output_shape():
+    enc = SubformulaEncoder(d_model=32)
+    form_vec = torch.randint(0, 4, (2, 5, ELEMENT_DIM))
+    parent_form_vec = torch.randint(4, 8, (2, ELEMENT_DIM))
+    out = enc(form_vec, parent_form_vec)
+    assert out.shape == (2, 5, 32)
+
+
+def test_spectrum_encoder_with_subformulae():
+    sub_enc = SubformulaEncoder(d_model=D_MODEL)
+    enc = SpectrumEncoder(
+        d_model=D_MODEL,
+        n_layers=N_LAYERS,
+        subformula_encoder=sub_enc,
+    )
+    enc.eval()
+    mz, intensity, precursor_mz = _make_batch()
+    subformulae = {
+        "form_vec": torch.randint(0, 4, (B, L, ELEMENT_DIM)),
+        "parent_form_vec": torch.randint(4, 8, (B, ELEMENT_DIM)),
+    }
+    with torch.no_grad():
+        out = enc(mz, intensity, precursor_mz, subformulae=subformulae)
     assert out.shape == (B, D_MODEL)
