@@ -21,9 +21,10 @@ Spectra for which neither resolves are skipped (not aborted).
 --benchmark reports the true (formula, adduct) retainment/accuracy at each
 pipeline stage -- SIRIUS decomp, the fast-filter cap (if used), and the
 mist_cf model at top-1/5/10 -- using ground truth read from
---benchmark-formula-field/--benchmark-adduct-field. The candidate-generation
-pipeline itself is unaffected by ground truth (same as a real blind run);
-truth is only used to measure where it survives.
+--benchmark-formula-field/--benchmark-adduct-field. The mist_cf model's
+top-1/5/10 accuracy is also broken down per ground-truth adduct. The
+candidate-generation pipeline itself is unaffected by ground truth (same as
+a real blind run); truth is only used to measure where it survives.
 """
 
 import argparse
@@ -441,6 +442,15 @@ def predict_mgf():
         )
         stage3_recall = {k: float((best_rank <= k).sum()) / n_bench for k in (1, 5, 10)}
 
+        # Per-adduct breakdown of stage-3 accuracy, keyed by ground-truth adduct.
+        adduct_specs = defaultdict(list)
+        for s in bench_specs:
+            adduct_specs[resolved[s]["true_ion"]].append(s)
+        stage3_recall_by_adduct = {
+            adduct: {k: float((best_rank.reindex(specs) <= k).sum()) / len(specs) for k in (1, 5, 10)}
+            for adduct, specs in sorted(adduct_specs.items())
+        }
+
         report_lines = [
             f"=== Benchmark (n={n_bench} spectra with usable ground truth) ===",
             f"Stage 1 (SIRIUS decomp)        : {stage1_recall:.1%} true formula retained",
@@ -449,7 +459,13 @@ def predict_mgf():
             f"Stage 3 (mist_cf model) top-1  : {stage3_recall[1]:.1%} accuracy",
             f"Stage 3 (mist_cf model) top-5  : {stage3_recall[5]:.1%} accuracy",
             f"Stage 3 (mist_cf model) top-10 : {stage3_recall[10]:.1%} accuracy",
+            "=== Stage 3 accuracy by true adduct ===",
         ]
+        for adduct, recall in stage3_recall_by_adduct.items():
+            n_adduct = len(adduct_specs[adduct])
+            report_lines.append(
+                f"{adduct:<10} (n={n_adduct:>5}): top-1 {recall[1]:.1%}  top-5 {recall[5]:.1%}  top-10 {recall[10]:.1%}"
+            )
         for line in report_lines:
             logging.info(line)
             print(line)
@@ -461,6 +477,10 @@ def predict_mgf():
             "model_recall_at_1": stage3_recall[1],
             "model_recall_at_5": stage3_recall[5],
             "model_recall_at_10": stage3_recall[10],
+            "model_recall_by_adduct": {
+                adduct: {"n": len(adduct_specs[adduct]), "top_1": recall[1], "top_5": recall[5], "top_10": recall[10]}
+                for adduct, recall in stage3_recall_by_adduct.items()
+            },
         }
         metrics_path = save_dir / "benchmark_metrics.json"
         with open(metrics_path, "w") as fp:
