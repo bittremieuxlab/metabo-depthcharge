@@ -382,7 +382,7 @@ def predict_mgf():
     if num_workers in (0, 1) or debug:
         [export_wrapper(e) for e in tqdm(all_entries)]
     else:
-        common.chunked_parallel(all_entries, export_wrapper, chunks=100, max_cpu=num_workers)
+        common.chunked_parallel(all_entries, export_wrapper, chunks=100, max_cpu=num_workers, pbar=True)
 
     # --- Score candidates with the trained mist_cf model. ---
     pred_dataset = mist_cf_data.PredDataset(
