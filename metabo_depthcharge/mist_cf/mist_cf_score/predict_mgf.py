@@ -77,7 +77,7 @@ def get_args():
     parser.add_argument("--instrument-override", default=None)
     parser.add_argument("--default-instrument", default="Unknown (LCMS)")
 
-    parser.add_argument("--decomp-filter", default="RDBE")
+    parser.add_argument("--decomp-filter", default="COMMON")
     parser.add_argument("--decomp-ppm", type=int, default=10)
     parser.add_argument("--elements", default=None, help="SIRIUS element alphabet string; defaults to decomp.EL_STR_DEFAULT.")
     parser.add_argument(
