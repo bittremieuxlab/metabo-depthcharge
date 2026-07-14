@@ -237,7 +237,8 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
     pool : str or None, default "attention"
         Pooling applied to the transformer output: ``"attention"`` (learned
         weighted sum over tokens, i.e. :class:`AttnAggregator`), ``"cls"``
-        (global/first token), or ``None`` to skip pooling and return the full
+        (global/first token), ``"last"`` (hidden state at each sample's last
+        non-padded position), or ``None`` to skip pooling and return the full
         token sequence together with its padding mask.
     subformula_encoder : nn.Module, optional
         :class:`SubformulaEncoder` whose output is added to peak embeddings
@@ -245,6 +246,11 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
     metadata_encoder : nn.Module, optional
         :class:`MetadataEncoder` whose output is added to the global/CLS
         token before the transformer.
+    causal : bool, default False
+        If ``True``, applies a causal (lower-triangular) self-attention mask:
+        the global/precursor token attends only to itself, and token at position
+        ``k`` (``1 <= k <= L``, the ``k``-th peak in caller-supplied order
+        attends to positions ``0..k``). Incompatible with ``pool="cls"``.
     """
 
     def __init__(
@@ -258,6 +264,7 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
         pool: str | None = "attention",
         subformula_encoder: nn.Module | None = None,
         metadata_encoder: nn.Module | None = None,
+        causal: bool = False,
     ):
         super().__init__(
             d_model=d_model,
@@ -274,10 +281,13 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
 
         self.precursor_cls = nn.Embedding(1, d_model)
 
-        if pool not in ("attention", "cls", None):
+        if pool not in ("attention", "cls", "last", None):
             raise ValueError(f"Unknown pool mode: {pool}")
+        if causal and pool == "cls":
+            raise ValueError("causal=True is incompatible with pool='cls'.")
         self.pool_mode = pool
         self.aggregator = AttnAggregator(d_model) if pool == "attention" else None
+        self.causal = causal
 
         self.subformula_encoder = subformula_encoder
         self.metadata_encoder = metadata_encoder
@@ -316,8 +326,8 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
         torch.Tensor or tuple[torch.Tensor, torch.Tensor]
             The output depends on the ``pool`` mode set at construction:
 
-            - ``pool in {"attention", "cls"}`` — a ``(B, d_model)`` float tensor
-              of spectrum embeddings.
+            - ``pool in {"attention", "cls", "last"}`` — a ``(B, d_model)``
+              float tensor of spectrum embeddings.
             - ``pool is None`` — an ``(out, padding_mask)`` tuple, where ``out`` is a
               ``(B, L + 1, d_model)`` tensor (global token at index 0 followed
               by the peak tokens) and ``padding_mask`` is a ``(B, L + 1)`` bool
@@ -350,14 +360,29 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
 
         peaks = torch.cat([latent_spectra[:, None, :], peaks], dim=1)
 
+        if self.causal:
+            seq_len = peaks.shape[1]
+            attn_mask = torch.triu(
+                torch.ones(seq_len, seq_len, dtype=torch.bool, device=peaks.device),
+                diagonal=1,
+            )
+        else:
+            attn_mask = None
+
         out = self.transformer_encoder(
-            peaks, mask=None, src_key_padding_mask=src_key_padding_mask
+            peaks,
+            mask=attn_mask,
+            src_key_padding_mask=src_key_padding_mask,
+            is_causal=self.causal,
         )
 
         if self.pool_mode is None:
             return out, src_key_padding_mask
         if self.pool_mode == "cls":
             return out[:, 0, :]
+        if self.pool_mode == "last":
+            last_idx = (~src_key_padding_mask).sum(dim=1) - 1  # (B,)
+            return out[torch.arange(out.shape[0], device=out.device), last_idx]
         return self.aggregator(out, mask=src_key_padding_mask)
 
     def global_token_hook(
