@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from .. import common
 
@@ -56,13 +57,11 @@ def run_sirius(
     mass_splits = np.array_split(unique_masses, num_sections)
 
     out_dfs = []
-    print(
+    tqdm.write(
         f"  Running {num_sections} SIRIUS batches serially with --cores {cores} "
-        f"({unique_masses.shape[0]} unique masses, heaviest-first)...",
-        flush=True,
+        f"({unique_masses.shape[0]} unique masses, heaviest-first)..."
     )
-    progress_step = max(1, num_sections // 20)
-    for batch_idx, mass_split in enumerate(mass_splits):
+    for batch_idx, mass_split in enumerate(tqdm(mass_splits, desc="SIRIUS decomp", unit="batch")):
         with tempfile.NamedTemporaryFile() as temp_file:
             file_name = temp_file.name
             # shell=False with list argv: each mass is its own arg, so we hit
@@ -97,18 +96,14 @@ def run_sirius(
                 out_dfs.append(pd.read_csv(file_name, sep="\t"))
             except (pd.errors.EmptyDataError, FileNotFoundError) as e:
                 tail = (result.stderr or result.stdout or "").strip().splitlines()[-15:]
-                print(
-                    f"WARNING: SIRIUS batch {batch_idx + 1} produced no readable output ({e}). "
-                    f"Exit={result.returncode}. Last stderr:\n    "
+                tqdm.write(
+                    f"WARNING: SIRIUS batch {batch_idx + 1}/{num_sections} produced no readable "
+                    f"output ({e}). Exit={result.returncode}. Last stderr:\n    "
                     + "\n    ".join(tail)
                 )
 
-        completed = batch_idx + 1
-        if completed % progress_step == 0 or completed == num_sections:
-            print(f"    {completed}/{num_sections} batches done", flush=True)
-
     if not out_dfs:
-        print("WARNING: All SIRIUS batches failed, returning empty results")
+        tqdm.write("WARNING: All SIRIUS batches failed, returning empty results")
         return {np.round(m, ROUND_FACTOR): [] for m in masses}
 
     df = pd.concat(out_dfs).reset_index(drop=True)

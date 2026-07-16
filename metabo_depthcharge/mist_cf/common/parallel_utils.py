@@ -3,7 +3,7 @@
 """parallel_utils.py"""
 
 
-def simple_parallel(input_list, function, max_cpu=16, timeout=4000, max_retries=3, pbar=False):
+def simple_parallel(input_list, function, max_cpu=16, timeout=4000, max_retries=3, pbar=False, desc=None):
     from pathos import multiprocessing as mp
 
     cpus = min(mp.cpu_count(), max_cpu)
@@ -11,7 +11,15 @@ def simple_parallel(input_list, function, max_cpu=16, timeout=4000, max_retries=
     if pbar:
         from tqdm import tqdm
 
-        results = list(tqdm(pool.imap(function, input_list), total=len(input_list)))
+        tagged = list(enumerate(input_list))
+
+        def _run_tagged(item, _fn=function):
+            i, x = item
+            return i, _fn(x)
+
+        pairs = list(tqdm(pool.imap_unordered(_run_tagged, tagged), total=len(input_list), desc=desc))
+        pairs.sort(key=lambda p: p[0])
+        results = [r for _, r in pairs]
     else:
         results = pool.map(function, input_list)
     pool.close()

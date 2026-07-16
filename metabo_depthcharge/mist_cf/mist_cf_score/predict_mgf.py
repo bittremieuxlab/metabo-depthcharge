@@ -310,7 +310,8 @@ def predict_mgf():
     rows = []
     n_no_cands = 0
     stage1_hits, stage2_hits = {}, {}
-    for spec, ion_masses in spec_to_ion_masses.items():
+    fast_filter_desc = "Fast-filtering candidates" if fast_model_obj is not None else "Building candidates"
+    for spec, ion_masses in tqdm(spec_to_ion_masses.items(), desc=fast_filter_desc, total=len(spec_to_ion_masses)):
         is_bench = benchmark and spec in resolved and "true_form" in resolved[spec]
         true_pair = (resolved[spec]["true_ion"], resolved[spec]["true_form"]) if is_bench else None
 
@@ -380,9 +381,9 @@ def predict_mgf():
         return common.assign_single_spec(**x)
 
     if num_workers in (0, 1) or debug:
-        [export_wrapper(e) for e in tqdm(all_entries)]
+        [export_wrapper(e) for e in tqdm(all_entries, desc="Assigning subformulae")]
     else:
-        common.chunked_parallel(all_entries, export_wrapper, chunks=100, max_cpu=num_workers, pbar=True)
+        common.simple_parallel(all_entries, export_wrapper, max_cpu=num_workers, pbar=True, desc="Assigning subformulae")
 
     # --- Score candidates with the trained mist_cf model. ---
     pred_dataset = mist_cf_data.PredDataset(
