@@ -35,7 +35,7 @@ def pad_stack(tensors, padding_amts):
 
 
 def to_float(x):
-    return torch.FloatTensor(x)
+    return torch.FloatTensor(np.asarray(x))
 
 
 def to_bool(x):

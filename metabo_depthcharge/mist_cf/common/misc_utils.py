@@ -47,23 +47,36 @@ class ConsoleLogger(pl.loggers.Logger):
         pass
 
 
+class _LevelAwareFormatter(logging.Formatter):
+    """Tags WARNING+ so they stand out; INFO (the common case) stays plain --
+    a bare level tag on every line is just noise at INFO."""
+
+    def format(self, record):
+        fmt = (
+            "%(asctime)s: %(message)s"
+            if record.levelno == logging.INFO
+            else "%(asctime)s %(levelname)s: %(message)s"
+        )
+        self._style._fmt = fmt
+        return super().format(record)
+
+
 def setup_logger(save_dir, log_name="output.log", debug=False):
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
     log_file = save_dir / log_name
 
     level = logging.DEBUG if debug is not False else logging.INFO
+    formatter = _LevelAwareFormatter()
 
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setLevel(level)
+    stream_handler.setFormatter(formatter)
     file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
 
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s: %(message)s",
-        handlers=[stream_handler, file_handler],
-    )
+    logging.basicConfig(level=level, handlers=[stream_handler, file_handler])
 
     logger = logging.getLogger("pytorch_lightning.core")
     logger.addHandler(logging.FileHandler(log_file))

@@ -35,6 +35,7 @@ def run_sirius(
     el_str=EL_STR_DEFAULT,
     cores=16,
     loglevel="WARNING",
+    desc="SIRIUS decomp",
 ):
     # Serial loop, SIRIUS handles parallelism internally via --cores. Earlier
     # ThreadPoolExecutor variant raced on the shared ~/.sirius-6.x/ refresh
@@ -61,7 +62,7 @@ def run_sirius(
         f"  Running {num_sections} SIRIUS batches serially with --cores {cores} "
         f"({unique_masses.shape[0]} unique masses, heaviest-first)..."
     )
-    for batch_idx, mass_split in enumerate(tqdm(mass_splits, desc="SIRIUS decomp", unit="batch")):
+    for batch_idx, mass_split in enumerate(tqdm(mass_splits, desc=desc, unit="batch")):
         with tempfile.NamedTemporaryFile() as temp_file:
             file_name = temp_file.name
             # shell=False with list argv: each mass is its own arg, so we hit

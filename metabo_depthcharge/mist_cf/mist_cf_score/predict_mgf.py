@@ -140,6 +140,7 @@ def predict_mgf():
     args = get_args()
     kwargs = args.__dict__
     debug = kwargs["debug"]
+    benchmark = kwargs["benchmark"]
 
     save_dir = Path(kwargs["save_dir"])
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -149,9 +150,19 @@ def predict_mgf():
 
     common.setup_logger(kwargs["save_dir"], log_name="mist_cf_pred_mgf.log", debug=debug)
     yaml_args = yaml.dump(kwargs, indent=2, default_flow_style=False)
-    logging.info(f"Args:\n{yaml_args}")
+    logging.debug(f"Args:\n{yaml_args}")
     with open(save_dir / "args.yaml", "w") as fp:
         fp.write(yaml_args)
+
+    total_steps = 6 if benchmark else 5
+    step_num = 0
+
+    def next_step(desc):
+        nonlocal step_num
+        step_num += 1
+        tag = f"Step {step_num}/{total_steps}: {desc}"
+        logging.info(tag)
+        return tag
 
     num_workers = kwargs["num_workers"]
     gpu = kwargs["gpu"]
@@ -166,12 +177,11 @@ def predict_mgf():
     parsed = common.parse_spectra_mgf(kwargs["mgf_file"], max_num=kwargs["max_num"])
     logging.info(f"Parsed {len(parsed)} spectra from {kwargs['mgf_file']}")
 
-    benchmark = kwargs["benchmark"]
     resolved = {}
     seen_ids = {}
     skipped = []
     n_bench_missing = 0
-    for i, (meta, spectra) in enumerate(tqdm(parsed, desc="Resolving spectra")):
+    for i, (meta, spectra) in enumerate(tqdm(parsed, desc=next_step("Resolving spectra"))):
         meta_ci = {str(k).upper(): v for k, v in meta.items()}
 
         def field(key, _m=meta_ci):
@@ -291,13 +301,14 @@ def predict_mgf():
                 spec_to_ion_masses[s].append((ion, m))
 
     all_masses = sorted({m for lst in spec_to_ion_masses.values() for _, m in lst})
-    logging.info(f"Global SIRIUS decomp over {len(all_masses)} unique neutral masses...")
+    logging.info(f"{len(all_masses)} unique neutral masses to decompose")
     sirius_kwargs = dict(
         filter_=kwargs["decomp_filter"],
         ppm=kwargs["decomp_ppm"],
         loglevel="NONE",
         cores=num_workers if num_workers > 0 else 1,
         mass_sort=False,
+        desc=next_step("SIRIUS decomp"),
     )
     if kwargs["elements"] is not None:
         sirius_kwargs["el_str"] = kwargs["elements"]
@@ -310,7 +321,7 @@ def predict_mgf():
     rows = []
     n_no_cands = 0
     stage1_hits, stage2_hits = {}, {}
-    fast_filter_desc = "Fast-filtering candidates" if fast_model_obj is not None else "Building candidates"
+    fast_filter_desc = next_step("Fast-filtering candidates" if fast_model_obj is not None else "Building candidates")
     for spec, ion_masses in tqdm(spec_to_ion_masses.items(), desc=fast_filter_desc, total=len(spec_to_ion_masses)):
         is_bench = benchmark and spec in resolved and "true_form" in resolved[spec]
         true_pair = (resolved[spec]["true_ion"], resolved[spec]["true_form"]) if is_bench else None
@@ -375,15 +386,15 @@ def predict_mgf():
         ]
         all_entries.append({"spec_name": spec, "export_dicts": export_dicts, "output_dir": subform_dir})
 
-    logging.info("Assigning subformulae")
+    subform_desc = next_step("Assigning subformulae")
 
     def export_wrapper(x):
         return common.assign_single_spec(**x)
 
     if num_workers in (0, 1) or debug:
-        [export_wrapper(e) for e in tqdm(all_entries, desc="Assigning subformulae")]
+        [export_wrapper(e) for e in tqdm(all_entries, desc=subform_desc)]
     else:
-        common.simple_parallel(all_entries, export_wrapper, max_cpu=num_workers, pbar=True, desc="Assigning subformulae")
+        common.simple_parallel(all_entries, export_wrapper, max_cpu=num_workers, pbar=True, desc=subform_desc)
 
     # --- Score candidates with the trained mist_cf model. ---
     pred_dataset = mist_cf_data.PredDataset(
@@ -405,22 +416,23 @@ def predict_mgf():
     model.eval()
     model = model.to(device)
 
-    logging.info("Predicting with mist_cf")
+    pred_desc = next_step("Predicting with mist_cf")
     if benchmark:
         # Unbounded ranking so top-10 recall is measurable even when
         # --output-num < 10; the saved file is still truncated to --output-num.
-        full_out_df = run_inference(model, pred_loader, device, output_num=None)
+        full_out_df = run_inference(model, pred_loader, device, output_num=None, desc=pred_desc)
         save_df = (
             full_out_df.groupby("spec").head(kwargs["output_num"])
             if kwargs["output_num"] is not None
             else full_out_df
         )
     else:
-        save_df = run_inference(model, pred_loader, device, kwargs["output_num"])
+        save_df = run_inference(model, pred_loader, device, kwargs["output_num"], desc=pred_desc)
     save_df.to_csv(save_name, sep="\t", index=None)
     logging.info(f"Wrote {save_name}")
 
     if benchmark:
+        next_step("Computing benchmark report")
         # Canonicalize the model's echoed cand_form the same way true_form was
         # canonicalized, so the merge doesn't depend on SIRIUS's raw element
         # ordering matching canon_formula's.
@@ -469,7 +481,6 @@ def predict_mgf():
             )
         for line in report_lines:
             logging.info(line)
-            print(line)
 
         metrics = {
             "n_benchmark_spectra": n_bench,
