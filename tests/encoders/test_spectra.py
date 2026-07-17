@@ -187,6 +187,53 @@ def test_spectrum_encoder_invalid_pool():
         SpectrumEncoder(d_model=D_MODEL, n_layers=N_LAYERS, pool="max")
 
 
+def test_spectrum_encoder_causal_perturbation_earlier_unchanged():
+    """Changing the last peak must not change earlier positions' outputs."""
+    enc = SpectrumEncoder(d_model=D_MODEL, n_layers=N_LAYERS, pool=None, causal=True)
+    enc.eval()
+    mz, intensity, precursor_mz = _make_batch()
+    with torch.no_grad():
+        out1, _ = enc(mz, intensity, precursor_mz)
+
+    mz2, intensity2 = mz.clone(), intensity.clone()
+    mz2[:, -1] = torch.rand(B).abs() + 5.0
+    intensity2[:, -1] = torch.rand(B).abs()
+    with torch.no_grad():
+        out2, _ = enc(mz2, intensity2, precursor_mz)
+
+    assert torch.allclose(out1[:, :L, :], out2[:, :L, :], atol=1e-5)
+    assert not torch.allclose(out1[:, L, :], out2[:, L, :], atol=1e-6)
+
+
+def test_spectrum_encoder_causal_no_padding_leak():
+    """Combining causal + padding masks must not NaN or leak padding into real positions."""
+    half = L // 2
+    mz = torch.zeros(B, L)
+    intensity = torch.zeros(B, L)
+    mz[:, :half] = torch.rand(B, half).abs() + 0.1
+    intensity[:, :half] = torch.rand(B, half).abs()
+    precursor_mz = torch.rand(B).abs() + 0.1
+
+    enc = SpectrumEncoder(d_model=D_MODEL, n_layers=N_LAYERS, pool=None, causal=True)
+    enc.eval()
+    with torch.no_grad():
+        out1, mask = enc(mz, intensity, precursor_mz)
+    assert torch.isfinite(out1).all()
+    assert mask[:, half + 1 :].all()
+
+    mz2, intensity2 = mz.clone(), intensity.clone()
+    mz2[:, -1] = torch.rand(B).abs() + 5.0
+    intensity2[:, -1] = torch.rand(B).abs()
+    with torch.no_grad():
+        out2, _ = enc(mz2, intensity2, precursor_mz)
+    assert torch.allclose(out1[:, : half + 1, :], out2[:, : half + 1, :], atol=1e-5)
+
+
+def test_spectrum_encoder_causal_cls_pool_raises():
+    with pytest.raises(ValueError, match="incompatible with pool='cls'"):
+        SpectrumEncoder(d_model=D_MODEL, n_layers=N_LAYERS, causal=True, pool="cls")
+
+
 def test_spectrum_encoder_with_metadata():
     meta_enc = MetadataEncoder(d_model=D_MODEL, metadata_fields=["adduct"])
     enc = SpectrumEncoder(
