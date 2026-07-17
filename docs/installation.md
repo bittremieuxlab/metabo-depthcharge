@@ -13,9 +13,8 @@ pip install git+https://github.com/bittremieuxlab/metabo-depthcharge.git
 :::
 
 :::{tab-item} conda + pip
-Conda is used only to manage the Python environment; the package itself is
-installed with pip because one of its dependencies (`depthcharge-ms`) is not
-available on conda-forge.
+Conda is used only to manage the Python environment.
+The package itself is installed with pip.
 
 ```bash
 conda create -n mdc python=3.11
@@ -24,16 +23,14 @@ pip install git+https://github.com/bittremieuxlab/metabo-depthcharge.git
 ```
 :::
 
-:::{tab-item} uv (contributors)
-For local development with a checked-out clone:
+:::{tab-item} uv
 
 ```bash
 git clone https://github.com/bittremieuxlab/metabo-depthcharge.git
 cd metabo-depthcharge
-uv sync --extra dev
+uv sync
 ```
 
-See [Contributing](contributing.md) for the full dev workflow.
 :::
 
 ::::

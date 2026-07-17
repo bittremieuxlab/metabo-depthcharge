@@ -1,6 +1,6 @@
 # Contributing
 
-Local development uses [uv](https://docs.astral.sh/uv/).
+We recommend [uv](https://docs.astral.sh/uv/) for local development.
 
 ## Setup
 
@@ -15,7 +15,8 @@ uv run pre-commit install
 
 ```bash
 uv run pytest tests/                                       # full suite
-uv run pytest tests/test_spectrum.py::test_name -v         # single test
+uv run pytest tests/spec/                                   # one subpackage
+uv run pytest tests/spec/test_preprocessing.py::test_name -v  # single test
 ```
 
 A failing test blocks `git commit` via the pre-commit hook.
