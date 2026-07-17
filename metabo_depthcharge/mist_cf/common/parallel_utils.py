@@ -3,19 +3,24 @@
 """parallel_utils.py"""
 
 
-def simple_parallel(input_list, function, max_cpu=16, timeout=4000, max_retries=3):
+def simple_parallel(input_list, function, max_cpu=16, timeout=4000, max_retries=3, pbar=False):
     from pathos import multiprocessing as mp
 
     cpus = min(mp.cpu_count(), max_cpu)
     pool = mp.Pool(processes=cpus)
-    results = pool.map(function, input_list)
+    if pbar:
+        from tqdm import tqdm
+
+        results = list(tqdm(pool.imap(function, input_list), total=len(input_list)))
+    else:
+        results = pool.map(function, input_list)
     pool.close()
     pool.join()
     return results
 
 
 def chunked_parallel(
-    input_list, function, chunks=100, max_cpu=16, timeout=4000, max_retries=3
+    input_list, function, chunks=100, max_cpu=16, timeout=4000, max_retries=3, pbar=False
 ):
     def batch_func(list_inputs):
         outputs = []
@@ -37,6 +42,7 @@ def chunked_parallel(
         max_cpu=max_cpu,
         timeout=timeout,
         max_retries=max_retries,
+        pbar=pbar,
     )
     full_output = [j for i in list_outputs for j in i]
     return full_output

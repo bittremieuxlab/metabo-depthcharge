@@ -27,7 +27,7 @@ def get_args():
     parser.add_argument("--label-file", default="data/canopus_train/labels.tsv")
     parser.add_argument("--max-decoy", type=int, default=int(1e10))
     parser.add_argument("--debug", action="store_true", default=False)
-    parser.add_argument("--decomp-filter", type=str, default="RDBE")
+    parser.add_argument("--decomp-filter", type=str, default="COMMON")
     parser.add_argument("--data-dir", type=str, default="data/canopus_train")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--sample-strat", action="store", default="uniform")

@@ -40,6 +40,82 @@ def get_args():
     return parser.parse_args()
 
 
+def run_inference(model, pred_loader, device, output_num=None):
+    """Score every (spec, cand_form, cand_ion) in ``pred_loader`` and return a
+    ranked DataFrame. Shared by predict() and predict_mgf.predict_mgf() so the
+    scoring loop only lives in one place.
+    """
+    out_names, out_forms, out_scores, out_ions, out_parentmasses = [], [], [], [], []
+    with torch.no_grad():
+        for batch in pred_loader:
+            (
+                peak_types,
+                form_vec,
+                ion_vec,
+                instrument_vec,
+                intens,
+                rel_mass_diffs,
+                num_peaks,
+            ) = (
+                batch["types"],
+                batch["form_vec"],
+                batch["ion_vec"],
+                batch["instrument_vec"],
+                batch["intens"],
+                batch["rel_mass_diffs"],
+                batch["num_peaks"],
+            )
+            peak_types = peak_types.to(device)
+            form_vec = form_vec.to(device)
+            ion_vec = ion_vec.to(device)
+            instrument_vec = instrument_vec.to(device)
+            intens = intens.to(device)
+            rel_mass_diffs = rel_mass_diffs.to(device)
+            num_peaks = num_peaks.to(device)
+
+            model_outs = model.forward(
+                num_peaks,
+                peak_types,
+                form_vec,
+                ion_vec,
+                instrument_vec,
+                intens,
+                rel_mass_diffs,
+            )
+
+            actual_forms = batch["str_forms"]
+            actual_ions = batch["str_ions"]
+            parentmasses = batch["parentmasses"]
+            scores = model_outs.squeeze(-1).cpu().numpy()
+            names = np.array(batch["names"])
+
+            out_names.extend(names)
+            out_scores.extend(scores)
+            out_forms.extend(actual_forms)
+            out_ions.extend(actual_ions)
+            out_parentmasses.extend(parentmasses)
+
+    output = {
+        "names": out_names,
+        "forms": out_forms,
+        "scores": out_scores,
+        "ions": out_ions,
+        "parentmasses": out_parentmasses,
+    }
+
+    out_df = pd.DataFrame(output)
+    out_df = out_df.sort_values(by=["names", "scores"], ascending=[True, False])
+    if output_num is not None:
+        out_df = out_df.groupby("names").head(output_num)
+    out_df["rank"] = (
+        out_df.groupby("names")["scores"].rank(ascending=False).astype(int)
+    )
+    out_df = out_df.rename(
+        columns={"names": "spec", "forms": "cand_form", "ions": "cand_ion"}
+    )
+    return out_df
+
+
 def predict():
     args = get_args()
     kwargs = args.__dict__
@@ -96,76 +172,8 @@ def predict():
     device = torch.device("cuda") if gpu else torch.device("cpu")
     model = model.to(device)
 
-    out_names, out_forms, out_scores, out_ions, out_parentmasses = [], [], [], [], []
-    with torch.no_grad():
-        for batch in pred_loader:
-            (
-                peak_types,
-                form_vec,
-                ion_vec,
-                instrument_vec,
-                intens,
-                rel_mass_diffs,
-                num_peaks,
-            ) = (
-                batch["types"],
-                batch["form_vec"],
-                batch["ion_vec"],
-                batch["instrument_vec"],
-                batch["intens"],
-                batch["rel_mass_diffs"],
-                batch["num_peaks"],
-            )
-            peak_types = peak_types.to(device)
-            form_vec = form_vec.to(device)
-            ion_vec = ion_vec.to(device)
-            instrument_vec = instrument_vec.to(device)
-            intens = intens.to(device)
-            rel_mass_diffs = rel_mass_diffs.to(device)
-            num_peaks = num_peaks.to(device)
-
-            model_outs = model.forward(
-                num_peaks,
-                peak_types,
-                form_vec,
-                ion_vec,
-                instrument_vec,
-                intens,
-                rel_mass_diffs,
-            )
-
-            actual_forms = batch["str_forms"]
-            actual_ions = batch["str_ions"]
-            parentmasses = batch["parentmasses"]
-            scores = model_outs.squeeze(-1).cpu().numpy()
-            names = np.array(batch["names"])
-
-            out_names.extend(names)
-            out_scores.extend(scores)
-            out_forms.extend(actual_forms)
-            out_ions.extend(actual_ions)
-            out_parentmasses.extend(parentmasses)
-
-        output = {
-            "names": out_names,
-            "forms": out_forms,
-            "scores": out_scores,
-            "ions": out_ions,
-            "parentmasses": out_parentmasses,
-        }
-
-        out_df = pd.DataFrame(output)
-        out_df = out_df.sort_values(by=["names", "scores"], ascending=[True, False])
-        output_num = kwargs["output_num"]
-        if output_num is not None:
-            out_df = out_df.groupby("names").head(output_num)
-        out_df["rank"] = (
-            out_df.groupby("names")["scores"].rank(ascending=False).astype(int)
-        )
-        out_df = out_df.rename(
-            columns={"names": "spec", "forms": "cand_form", "ions": "cand_ion"}
-        )
-        out_df.to_csv(save_name, sep="\t", index=None)
+    out_df = run_inference(model, pred_loader, device, kwargs["output_num"])
+    out_df.to_csv(save_name, sep="\t", index=None)
 
 
 if __name__ == "__main__":
