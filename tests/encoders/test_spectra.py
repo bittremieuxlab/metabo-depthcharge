@@ -233,6 +233,7 @@ def test_spectrum_encoder_causal_cls_pool_raises():
     with pytest.raises(ValueError, match="incompatible with pool='cls'"):
         SpectrumEncoder(d_model=D_MODEL, n_layers=N_LAYERS, causal=True, pool="cls")
 
+
 def test_spectrum_encoder_with_metadata():
     meta_enc = MetadataEncoder(d_model=D_MODEL, metadata_fields=["adduct"])
     enc = SpectrumEncoder(
