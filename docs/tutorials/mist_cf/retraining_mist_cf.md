@@ -137,58 +137,59 @@ When omitted, the entire dataset is run at once.
 
 ## 5. Train MIST-CF
 
+To train, plug in your own paths:
+
+```bash
+python -m metabo_depthcharge.mist_cf.mist_cf_score.train \
+    --gpu \
+    --num-workers 8 \
+    --batch-size 64 \
+    --max-epochs 200 \
+    --max-decoy 32 \
+    --max-subpeak 20 \
+    --save-dir "$DATA_DIR/results/train/" \
+    --dataset-name msgym \
+    --split-file "$DATA_DIR/splits/split_own.tsv" \
+    --decoy-label "$DATA_DIR/decoy_labels/decoy_label_COMMON.tsv" \
+    --subform-dir "$DATA_DIR/subformulae/formulae_spec_decoy_label_COMMON" \
+    --layers 4 \
+    --dropout 0.1 \
+    --learning-rate 0.0003 \
+    --lr-decay-frac 0.8830 \
+    --weight-decay 0 \
+    --form-encoder 'abs-sines' \
+    --val-check-interval 1000 \
+    --patience 50
+```
+
 Differences with original MIST-CF:
 - Early stopping on val acc instead of val loss (better copes with OOD splits)
 - `batch_size=4` to  `batch_size=64`
 - `layers=2` to  `layers=4`
 - `learning-rate=0.00045` to  `learning-rate=0.0003`
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m metabo_depthcharge.mist_cf.mist_cf_score.train \
-    --gpu \
-    --dataset-name canopus_train \
-    --split-file data/canopus_train/splits/split_1.tsv \
-    --decoy-label data/canopus_train/decoy_labels/decoy_label_COMMON.tsv \
-    --subform-dir data/canopus_train/subformulae/formulae_spec_decoy_label_COMMON \
-    --seed 1 \
-    --num-workers 8 \
-    --batch-size 4 \
-    --max-decoy 32 \
-    --max-epochs 200 \
-    --learning-rate 0.00045 \
-    --lr-decay-frac 0.88 \
-    --weight-decay 0 \
-    --max-subpeak 20 \
-    --layers 2 \
-    --dropout 0.1 \
-    --hidden-size 128 \
-    --form-encoder abs-sines \
-    --no-cls-mass-diff \
-    --save-dir results/public_mist_cf/split_1
-```
+## 6. Predict
 
-## 4. Predict
-
-Score an MGF file with a trained checkpoint (the fast filter pre-selects
-`--fast-num` candidates per spectrum):
+Generate formula predictions for any spectrum in any mgf file via (plug in your own paths):
 
 ```bash
 python -m metabo_depthcharge.mist_cf.mist_cf_score.predict_mgf \
-    --id-key FEATURE_ID \
-    --num-workers 0 \
-    --batch-size 8 \
-    --save-dir quickstart/mist_cf_out/ \
-    --mgf-file data/demo_specs.mgf \
-    --checkpoint-pth quickstart/models/mist_cf_best.ckpt \
-    --fast-model quickstart/models/fast_filter_best.ckpt \
+    --gpu \
+    --num-workers 16 \
+    --mgf-file /your/file.mgf \
+    --checkpoint-pth /your/trained/mistcf.ckpt \
+    --save-dir /your/save/dir \
+    --id-key IDENTIFIER \
+    --precursor-mz-key PRECURSOR_MZ \
+    --adduct-key ADDUCT \
+    --instrument-key INSTRUMENT_TYPE \
+    --adducts "[M+H]+,[M+Na]+" \
+    --fast-model /your/trained/fastfilter.ckpt \
     --fast-num 256 \
-    --instrument-override "Orbitrap (LCMS)" \
-    --decomp-ppm 5 \
-    --decomp-filter RDBE
-    # --gpu
+    --output-num 5 \
+    --benchmark \
+    --benchmark-formula-field FORMULA \
+    --benchmark-adduct-field ADDUCT
 ```
 
-Use `predict` instead of `predict_mgf` to score from a labels file rather than
-an MGF.
-
-Every script accepts `--help` for the full argument list.
+The `--benchmark` flag makes the script report accuracy metrics for mgf files where a ground truth formula and adduct field are known (read via the `--benchmark-formula-field` and `--benchmark-adduct-field` flags).

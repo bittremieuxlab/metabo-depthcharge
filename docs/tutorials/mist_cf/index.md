@@ -1,6 +1,6 @@
 # MIST-CF Tutorials
 
-`metabo-deptcharge` ships with a vendored [`mist-cf`](https://github.com/samgoldman97/mist-cf) implementation where slight changes have been made to processing scripts and default settings.
+`metabo-depthcharge` ships with a vendored [`mist-cf`](https://github.com/samgoldman97/mist-cf) implementation where slight changes have been made to processing scripts and default settings.
 
 Changes of note:
 
