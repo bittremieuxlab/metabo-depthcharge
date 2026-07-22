@@ -20,6 +20,7 @@ from metabo_depthcharge.chem.representations import (
     MoleculeToMolFormer,
     MoleculeToMorgan,
     MoleculeToRdkit,
+    MoleculeToSAFEGPT,
 )
 from metabo_depthcharge.datasets._common import (
     hf_cache_file,
@@ -85,6 +86,12 @@ _REP_INFO: dict[str, dict] = {
         "size": 768,
         "neural": True,
         "build": lambda **kw: MoleculeToMolFormer(**kw),
+    },
+    "safegpt": {
+        "kind": "dense",
+        "size": 768,
+        "neural": True,
+        "build": lambda **kw: MoleculeToSAFEGPT(**kw),
     },
 }
 

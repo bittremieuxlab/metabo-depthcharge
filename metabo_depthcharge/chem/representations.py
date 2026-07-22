@@ -13,10 +13,11 @@ from transformers import AutoModel, AutoTokenizer
 
 from metabo_depthcharge.chem.molecule import Molecule, _lenient_mol_from_smiles
 from metabo_depthcharge.chem.tokenizers import (
-    load_tokenizer, 
-    load_model, 
-    smiles_to_tokens
+    load_model,
+    load_tokenizer,
+    smiles_to_tokens,
 )
+
 
 def _batched(fn):
     @functools.wraps(fn)
@@ -336,8 +337,8 @@ class MoleculeToSAFEGPT(_HFEmbedder):
     """SAFE-GPT pretrained embeddings.
 
     Always uses mean-pooled hidden state from ``last_hidden_state`` (ignores any
-    pooler the model exposes). Converts SMILES to SAFE representation. 
-    Uses the  SAFE-GPT model from ``datamol-io/safe-gpt``
+    pooler the model exposes). Converts SMILES to SAFE representation.
+    Uses the SAFE-GPT model from ``datamol-io/safe-gpt``
 
     Parameters
     ----------

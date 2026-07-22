@@ -1,18 +1,17 @@
 """Molecular tokenization converters (SAFE, SMILES, etc.)."""
 
+import importlib.util
+import io
 import json
 import sys
 import types
-import importlib.util
-import logging
-import io
 from contextlib import redirect_stderr
 
+from huggingface_hub import hf_hub_download
 from rdkit import Chem
 from tokenizers import Regex, Tokenizer
 from tokenizers.pre_tokenizers import Split
 from transformers import AutoModel, PreTrainedTokenizerFast
-from huggingface_hub import hf_hub_download
 
 
 SAFE_PATTERN = r"""(\[[^\]]+]|Br?|Cl?|N|O|S|P|F|I|b|c|n|o|s|p|\(|\)|\.|=|#|-|\+|\\|\/|:|~|@|\?|>>?|\*|\$|\%[0-9]{2}|[0-9])"""
@@ -21,23 +20,30 @@ MODEL_NAME = "datamol-io/safe-gpt"
 
 def load_tokenizer():
     """Load SAFE-GPT tokenizer with custom pre-tokenizer."""
-    data = json.load(open(hf_hub_download(MODEL_NAME, "tokenizer.json")))
+    with open(hf_hub_download(MODEL_NAME, "tokenizer.json")) as f:
+        data = json.load(f)
     attrs = data.get("tokenizer_attrs", {})
     for k in ("custom_pre_tokenizer", "tokenizer_type", "tokenizer_attrs"):
         data.pop(k, None)
     raw = Tokenizer.from_str(json.dumps(data))
     raw.pre_tokenizer = Split(Regex(SAFE_PATTERN), behavior="isolated")
-    special = ("pad_token", "unk_token", "bos_token", "eos_token",
-               "cls_token", "sep_token", "mask_token")
+    special = (
+        "pad_token",
+        "unk_token",
+        "bos_token",
+        "eos_token",
+        "cls_token",
+        "sep_token",
+        "mask_token",
+    )
     return PreTrainedTokenizerFast(
-        tokenizer_object=raw,
-        **{k: attrs[k] for k in special if k in attrs}
+        tokenizer_object=raw, **{k: attrs[k] for k in special if k in attrs}
     )
 
 
 def load_model(device: str, dtype):
     """Load SAFE-GPT model."""
-    model = AutoModel.from_pretrained(MODEL_NAME, torch_dtype=dtype).to(device).eval()
+    model = AutoModel.from_pretrained(MODEL_NAME, dtype=dtype).to(device).eval()
     return model
 
 
@@ -52,6 +58,7 @@ def smiles_to_safe_strings(smiles_list: list[str]) -> list:
     # Suppress SAFE converter warnings by redirecting stderr for the entire operation
     with redirect_stderr(io.StringIO()):
         from safe.converter import SAFEConverter
+
         converter = SAFEConverter()
 
         safe_strs = []
@@ -59,9 +66,11 @@ def smiles_to_safe_strings(smiles_list: list[str]) -> list:
             try:
                 mol = Chem.MolFromSmiles(smi)
                 safe_strs.append(
-                    converter.encoder(Chem.MolToSmiles(mol), allow_empty=True) if mol else None
+                    converter.encoder(Chem.MolToSmiles(mol), allow_empty=True)
+                    if mol
+                    else None
                 )
-            except:
+            except Exception:
                 safe_strs.append(None)
 
     return safe_strs

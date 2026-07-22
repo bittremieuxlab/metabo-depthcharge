@@ -9,6 +9,7 @@ from metabo_depthcharge.chem.representations import (
     MoleculeToMolFormer,
     MoleculeToMorgan,
     MoleculeToRdkit,
+    MoleculeToSAFEGPT,
 )
 from metabo_depthcharge.chem.similarities import (
     BinaryTanimoto,
@@ -31,4 +32,5 @@ __all__ = [
     "MoleculeToMolFormer",
     "MoleculeToMorgan",
     "MoleculeToRdkit",
+    "MoleculeToSAFEGPT",
 ]
