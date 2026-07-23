@@ -12,6 +12,11 @@ from rdkit.Chem import AllChem, DataStructs
 from transformers import AutoModel, AutoTokenizer
 
 from metabo_depthcharge.chem.molecule import Molecule, _lenient_mol_from_smiles
+from metabo_depthcharge.chem.tokenizers import (
+    load_model,
+    load_tokenizer,
+    smiles_to_tokens,
+)
 
 
 def _batched(fn):
@@ -325,4 +330,54 @@ class MoleculeToChemBERTa(_HFEmbedder):
         super().__init__(model_name, device, trust_remote_code=False, pooling="cls")
 
     # Re-expose the inherited call operator so it is documented on this class.
+    __call__ = _HFEmbedder.__call__
+
+
+class MoleculeToSAFEGPT(_HFEmbedder):
+    """SAFE-GPT pretrained embeddings.
+
+    Always uses mean-pooled hidden state from ``last_hidden_state`` (ignores any
+    pooler the model exposes). Converts SMILES to SAFE representation.
+    Uses the SAFE-GPT model from ``datamol-io/safe-gpt``
+
+    Parameters
+    ----------
+    device : str, default ``"cpu"``
+        ``"cpu"``, ``"cuda"``, or ``"cuda:N"``.
+    """
+
+    def __init__(self, device: str = "cpu"):
+        if device == "cpu":
+            self.torch_device = torch.device("cpu")
+        elif device.startswith("cuda"):
+            self.torch_device = torch.device(device if ":" in device else "cuda")
+        else:
+            raise ValueError(f"Invalid device: {device}")
+
+        self.model_name = "datamol-io/safe-gpt"
+        self.device = device
+        dtype = torch.float16 if device.startswith("cuda") else torch.float32
+        self.tokenizer = load_tokenizer()
+        self.model = load_model(device, dtype)
+        self.rep_size = 768
+
+    def _embed(self, smiles_list: list[str]) -> np.ndarray:
+        inputs = smiles_to_tokens(smiles_list, self.tokenizer)
+        if inputs["input_ids"] is None:
+            return np.full((len(smiles_list), self.rep_size), np.nan, dtype=np.float32)
+
+        keep_idx = inputs.pop("keep_idx")
+        inputs = {k: v.to(self.torch_device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            hidden = self.model(**inputs).last_hidden_state
+            mask = inputs["attention_mask"].unsqueeze(-1).to(hidden.dtype)
+            emb = (hidden * mask).sum(1) / mask.sum(1).clamp(min=1)
+            emb = emb.cpu().numpy().astype(np.float32)
+
+        result = np.full((len(smiles_list), self.rep_size), np.nan, dtype=np.float32)
+        for idx, keep_i in enumerate(keep_idx):
+            result[keep_i] = emb[idx]
+        return result
+
     __call__ = _HFEmbedder.__call__

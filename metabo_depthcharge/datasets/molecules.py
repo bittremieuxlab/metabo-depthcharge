@@ -20,6 +20,7 @@ from metabo_depthcharge.chem.representations import (
     MoleculeToMolFormer,
     MoleculeToMorgan,
     MoleculeToRdkit,
+    MoleculeToSAFEGPT,
 )
 from metabo_depthcharge.datasets._common import (
     hf_cache_file,
@@ -85,6 +86,12 @@ _REP_INFO: dict[str, dict] = {
         "size": 768,
         "neural": True,
         "build": lambda **kw: MoleculeToMolFormer(**kw),
+    },
+    "safegpt": {
+        "kind": "dense",
+        "size": 768,
+        "neural": True,
+        "build": lambda **kw: MoleculeToSAFEGPT(**kw),
     },
 }
 
@@ -430,7 +437,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
             for the builder or ``None`` for defaults.
             Valid names: ``"morgan"``, ``"morgan_count"``, ``"rdkit"``,
             ``"rdkit_count"``, ``"maccs"``, ``"biosynfoni"``, ``"map4"``,
-            ``"chemberta"``, ``"molformer"``.
+            ``"chemberta"``, ``"molformer"``, ``"safegpt"``.
             See the :doc:`chem module </api/chem>` for builder
             keyword arguments.
             E.g. ``{"morgan": None, "chemberta": {"device": "cuda"}}``.
@@ -686,7 +693,8 @@ class MoleculeDataset(torch.utils.data.Dataset):
             One or more representation column names previously added via
             :meth:`add_representations`. Valid names: ``"morgan"``,
             ``"morgan_count"``, ``"rdkit"``, ``"rdkit_count"``, ``"maccs"``,
-            ``"biosynfoni"``, ``"map4"``, ``"chemberta"``, ``"molformer"``.
+            ``"biosynfoni"``, ``"map4"``, ``"chemberta"``, ``"molformer"``,
+            ``"safegpt"``.
             A single-element list returns :class:`~metabo_depthcharge.encoders.molecules.MolMLP`;
             two or more return :class:`~metabo_depthcharge.encoders.molecules.MultiMolMLP`.
         n_blocks : int

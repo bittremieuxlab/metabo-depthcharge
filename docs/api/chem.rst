@@ -28,6 +28,7 @@ Representations
    MoleculeToMAP4
    MoleculeToMolFormer
    MoleculeToChemBERTa
+   MoleculeToSAFEGPT
 
 Similarities
 ------------
