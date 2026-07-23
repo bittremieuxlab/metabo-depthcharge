@@ -1,10 +1,9 @@
 # Tutorials
 
-Just an empty stub for now. Refer to the API Reference which should be in a more complete state.
+For now, only MIST-CF tutorials are developed.
 
 ```{toctree}
-:maxdepth: 1
+:maxdepth: 2
 
-
-placeholder
+mist_cf/index
 ```

@@ -75,7 +75,7 @@ class PredDataset(Dataset):
 
         if self.num_workers == 0:
             self.embedded_forms = [
-                common.formula_to_dense(i) for i in tqdm(self.cand_forms)
+                common.formula_to_dense(i) for i in self.cand_forms
             ]
         else:
             self.embedded_forms = common.chunked_parallel(

@@ -351,6 +351,151 @@ def rdbe_filter(cross_prod):
     return filter_inds
 
 
+# ---------------------------------------------------------------------------
+# Meet-in-the-middle (mitm) subformula assignment (fast path for large cands).
+# ---------------------------------------------------------------------------
+
+def _mitm_split(nonzero_inds, counts):
+    """Greedily partition present elements into two halves balancing the
+    product of (count+1) (i.e. each half's cross-product row count)."""
+    order = sorted(nonzero_inds, key=lambda i: -(int(counts[i]) + 1))
+    a, b = [], []
+    prod_a, prod_b = 1, 1
+    for i in order:
+        if prod_a <= prod_b:
+            a.append(i)
+            prod_a *= int(counts[i]) + 1
+        else:
+            b.append(i)
+            prod_b *= int(counts[i]) + 1
+    return a, b
+
+
+def _enumerate_half(inds, counts):
+    """Enumerate every subset of the given element indices as dense vectors,
+    returning (dense (n x CHEM_ELEMENT_NUM), neutral masses, rdbe contributions).
+    An empty `inds` yields the single all-zero subset."""
+    zero_vec = np.zeros((1, CHEM_ELEMENT_NUM))
+    vectorized = [
+        ELEMENT_VECTORS[i] * np.arange(0, int(counts[i]) + 1).reshape(-1, 1)
+        for i in inds
+    ]
+    cross = reduce(cross_sum, vectorized, zero_vec)
+    masses = cross.dot(VALID_MONO_MASSES)
+    rdbe_contrib = cross.dot(rdbe_mult)
+    return cross, masses, rdbe_contrib
+
+
+def assign_subforms_mitm(form, spec, ion_type, mass_diff_thresh=15, window_factor=2.0):
+    """Meet-in-the-middle equivalent of `assign_subforms`.
+
+    Produces the identical output_dict for every peak that survives
+    `valid_mask` in the original. Equivalence argument:
+
+    * The original keeps a peak iff clipped_ppm(min_mass_diff) < thresh, where
+      min_mass_diff is the distance to the globally closest rdbe-valid subset.
+      Hence a retained peak's reported subformula lies within `thresh` ppm.
+    * We search a per-peak window of `window_factor * thresh` ppm (>= thresh),
+      so any subformula that could be retained is inside the window, and the
+      closest one inside the window equals the global closest whenever the
+      global closest is within the window (i.e. whenever the peak is retained).
+    * rdbe filtering is additive across the two halves
+      (1 + 0.5*(rdbe_A + rdbe_B) >= 0), reproducing the original's per-subset
+      rdbe_filter exactly.
+    * The original's post-filter dedup loop is a no-op (its formula_idx_dict is
+      never populated), so retained peaks pass through unchanged and in order.
+    """
+    dense_formula = formula_to_dense(form)
+    counts = dense_formula.astype(np.int64)
+    nonzero = np.nonzero(counts)[0]
+
+    a_inds, b_inds = _mitm_split(nonzero, counts)
+    A_dense, A_mass, A_rdbe = _enumerate_half(a_inds, counts)
+    B_dense, B_mass, B_rdbe = _enumerate_half(b_inds, counts)
+
+    order = np.argsort(B_mass, kind="stable")
+    B_dense, B_mass, B_rdbe = B_dense[order], B_mass[order], B_rdbe[order]
+
+    spec_masses, spec_intens = spec[:, 0], spec[:, 1]
+    ion_mass = ion_to_mass[ion_type]
+    n_peaks = len(spec_masses)
+
+    best_diff = np.full(n_peaks, np.inf)
+    best_dense = np.zeros((n_peaks, CHEM_ELEMENT_NUM))
+
+    clip_mass = np.where(spec_masses < 200, 200.0, spec_masses)
+    window = window_factor * mass_diff_thresh * clip_mass / 1e6 + 1e-6
+
+    for p in range(n_peaks):
+        target_neutral = spec_masses[p] - ion_mass
+        need = target_neutral - A_mass  # required B-half mass for each A-half subset
+        w = window[p]
+        lo = np.searchsorted(B_mass, need - w, side="left")
+        hi = np.searchsorted(B_mass, need + w, side="right")
+        pair_counts = hi - lo
+        nz = np.nonzero(pair_counts)[0]
+        if nz.size == 0:
+            continue
+        a_rep = np.repeat(nz, pair_counts[nz])
+        b_idx = np.concatenate([np.arange(lo[a], hi[a]) for a in nz])
+
+        rdbe_total = 1 + 0.5 * (A_rdbe[a_rep] + B_rdbe[b_idx])
+        keep = rdbe_total >= 0
+        if not keep.any():
+            continue
+        a_rep, b_idx = a_rep[keep], b_idx[keep]
+
+        comb_mass = A_mass[a_rep] + B_mass[b_idx]
+        diff = np.abs(comb_mass - target_neutral)
+        k = int(np.argmin(diff))
+        best_diff[p] = diff[k]
+        best_dense[p] = A_dense[a_rep[k]] + B_dense[b_idx[k]]
+
+    rel_mass_diff = clipped_ppm(best_diff, spec_masses)
+    valid_mask = rel_mass_diff < mass_diff_thresh
+
+    spec_masses = spec_masses[valid_mask]
+    spec_intens = spec_intens[valid_mask]
+    dense_valid = best_dense[valid_mask]
+
+    mono_mass = dense_valid.dot(VALID_MONO_MASSES) + ion_mass
+    abs_mass_diff = np.abs(spec_masses - mono_mass)
+    rel_mass_diff = clipped_ppm(abs_mass_diff, spec_masses)
+    formulas = np.array([vec_to_formula(d) for d in dense_valid])
+    ion_types = np.array([ion_type] * len(formulas))
+
+    if spec_intens.size == 0:
+        output_tbl = None
+    else:
+        output_tbl = {
+            "mz": list(spec_masses),
+            "ms2_inten": list(spec_intens),
+            "mono_mass": list(mono_mass),
+            "abs_mass_diff": list(abs_mass_diff),
+            "mass_diff": list(rel_mass_diff),
+            "formula": list(formulas),
+            "ions": list(ion_types),
+        }
+    return {"cand_form": form, "cand_ion": ion_type, "output_tbl": output_tbl}
+
+
+def assign_subforms_fast(
+    form, spec, ion_type, mass_diff_thresh=15, hybrid_threshold=2_000
+):
+    """Hybrid dispatch: original full-enumeration for small candidates (where
+    its cross-product is cheap and MITM setup overhead isn't worth it), MITM for
+    large ones. `hybrid_threshold` is on the estimated cross-product row count
+    (product of (count_i + 1)); calibrated empirically on real spectraverse
+    data -- old wins below ~1-3k rows, MITM wins decisively above that (>99.9%
+    of candidates with >3k estimated rows favor MITM)."""
+    dense_formula = formula_to_dense(form)
+    nz = dense_formula[dense_formula > 0]
+    est_rows = float(np.prod(nz + 1)) if nz.size else 1.0
+    if est_rows <= hybrid_threshold:
+        return assign_subforms(form, spec, ion_type, mass_diff_thresh)
+    return assign_subforms_mitm(form, spec, ion_type, mass_diff_thresh)
+
+
 def assign_subforms(form, spec, ion_type, mass_diff_thresh=15):
     cross_prod, masses = get_all_subsets(form)
     spec_masses, spec_intens = spec[:, 0], spec[:, 1]
@@ -418,7 +563,7 @@ def get_output_dict(spec_name, spec, form, mass_diff_type, mass_diff_thresh, ion
     assert mass_diff_type == "ppm"
     output_dict = {"cand_form": form, "cand_ion": ion_type, "output_tbl": None}
     if spec is not None and ion_type in ION_LST:
-        output_dict = assign_subforms(
+        output_dict = assign_subforms_fast(
             form, spec, ion_type, mass_diff_thresh=mass_diff_thresh
         )
     return output_dict

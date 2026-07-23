@@ -12,6 +12,7 @@ import pandas as pd
 import torch
 import yaml
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from .. import common
 from . import mist_cf_data, mist_cf_model
@@ -40,14 +41,14 @@ def get_args():
     return parser.parse_args()
 
 
-def run_inference(model, pred_loader, device, output_num=None):
+def run_inference(model, pred_loader, device, output_num=None, desc="Predicting"):
     """Score every (spec, cand_form, cand_ion) in ``pred_loader`` and return a
     ranked DataFrame. Shared by predict() and predict_mgf.predict_mgf() so the
     scoring loop only lives in one place.
     """
     out_names, out_forms, out_scores, out_ions, out_parentmasses = [], [], [], [], []
     with torch.no_grad():
-        for batch in pred_loader:
+        for batch in tqdm(pred_loader, desc=desc):
             (
                 peak_types,
                 form_vec,
@@ -132,7 +133,7 @@ def predict():
     common.setup_logger(kwargs["save_dir"], log_name="mist_cf_pred.log", debug=debug)
 
     yaml_args = yaml.dump(kwargs, indent=2, default_flow_style=False)
-    logging.info(f"Args:\n{yaml_args}")
+    logging.debug(f"Args:\n{yaml_args}")
     with open(Path(kwargs["save_dir"]) / "args.yaml", "w") as fp:
         fp.write(yaml_args)
 
