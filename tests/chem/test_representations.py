@@ -14,6 +14,7 @@ from metabo_depthcharge.chem import (
     MoleculeToMolFormer,
     MoleculeToMorgan,
     MoleculeToRdkit,
+    MoleculeToSAFEGPT,
 )
 
 
@@ -146,3 +147,8 @@ def test_chemberta(aspirin_mol):
 def test_molformer_raise_arg(aspirin_mol):
     with pytest.raises(ValueError):
         MoleculeToMolFormer(device="brick")
+
+
+def test_safegpt(aspirin_mol, caffeine):
+    enc = MoleculeToSAFEGPT()
+    assert enc([aspirin_mol, Molecule(caffeine)]).shape == (2, 768)
