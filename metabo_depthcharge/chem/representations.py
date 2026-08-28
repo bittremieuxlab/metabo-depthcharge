@@ -11,12 +11,23 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, DataStructs
 from transformers import AutoModel, AutoTokenizer
 
+from metabo_depthcharge.chem import graphs
 from metabo_depthcharge.chem.molecule import Molecule, _lenient_mol_from_smiles
 from metabo_depthcharge.chem.tokenizers import (
     load_model,
     load_tokenizer,
     smiles_to_tokens,
 )
+
+
+def _batched_list(fn):
+    @functools.wraps(fn)
+    def wrapper(self, mol):
+        if isinstance(mol, Molecule):
+            return fn(self, mol)
+        return [fn(self, m) for m in mol]
+
+    return wrapper
 
 
 def _batched(fn):
@@ -67,6 +78,47 @@ class MoleculeToMorgan:
         if self.counts:
             return self.fpgen.GetCountFingerprintAsNumPy(mol.mol)
         return self.fpgen.GetFingerprintAsNumPy(mol.mol)
+
+
+class MoleculeToGraph:
+    """Molecular graphs, for the graph-based molecule encoders.
+
+    Each molecule yields per-atom and per-bond arrays. Use
+    :func:`~metabo_depthcharge.chem.graphs.pack` to fuse a collection of
+    molecular graphs into the flat table an encoder indexes.
+    """
+
+    #: Per-molecule array names this produces.
+    KEYS = ("atom_key", "bsrc", "bdst", "bcode")
+
+    @_batched_list
+    def __call__(
+        self, mol: Molecule | Iterable[Molecule]
+    ) -> dict[str, np.ndarray] | list[dict[str, np.ndarray]]:
+        """Featurize one or more molecules.
+
+        Parameters
+        ----------
+        mol : Molecule or iterable of Molecule
+            A single molecule or an iterable of molecules.
+
+        Returns
+        -------
+        dict or list of dict
+            One dict per molecule (a list of them for an iterable), holding:
+
+            ``atom_key`` : ``(n_atoms,)`` int64
+                One :func:`~metabo_depthcharge.chem.graphs.atom_key` per atom.
+            ``bsrc``, ``bdst`` : ``(n_bonds,)`` uint16
+                The two atoms of each bond, as positions in ``atom_key``.
+                Reverse edges and self-loops are not included but built internally
+                by :func:`~metabo_depthcharge.chem.graphs.expand_bonds`.
+            ``bcode`` : ``(n_bonds,)`` uint8
+                Each bond's :func:`~metabo_depthcharge.chem.graphs.bond_code`, a
+                value in ``[0, 16)`` packing bond order, conjugation and ring
+                membership.
+        """
+        return graphs.featurize(mol.mol)
 
 
 class MoleculeToRdkit:

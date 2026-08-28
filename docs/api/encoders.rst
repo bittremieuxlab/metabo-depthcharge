@@ -25,6 +25,8 @@ Molecule encoders
 
    MolMLP
    MultiMolMLP
+   GraphMolEncoder
+   BondMolEncoder
 
 Shared building blocks
 ----------------------

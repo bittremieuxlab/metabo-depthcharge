@@ -5,16 +5,19 @@ import tempfile
 import uuid
 from collections.abc import Callable, Iterable
 from os import PathLike
+from pathlib import Path
 
 import numpy as np
 import torch
 from datasets import Dataset, Features, Sequence, Value
 from tqdm.auto import tqdm
 
+from metabo_depthcharge.chem import graphs
 from metabo_depthcharge.chem.molecule import PROPERTIES, Molecule
 from metabo_depthcharge.chem.representations import (
     MoleculeToBiosynfoni,
     MoleculeToChemBERTa,
+    MoleculeToGraph,
     MoleculeToMACCS,
     MoleculeToMAP4,
     MoleculeToMolFormer,
@@ -30,6 +33,9 @@ from metabo_depthcharge.datasets._common import (
 )
 from metabo_depthcharge.encoders.molecules import MolMLP, MultiMolMLP
 
+
+_GRAPH_PREFIX = "graph_"
+_GRAPH_TABLE_FILE = "graph_table.pt"
 
 _REP_INFO: dict[str, dict] = {
     "morgan": {
@@ -94,6 +100,36 @@ _REP_INFO: dict[str, dict] = {
         "build": lambda **kw: MoleculeToSAFEGPT(**kw),
     },
 }
+
+
+def _column(ds: Dataset, name: str) -> np.ndarray:
+    """
+    One column as numpy, honoring the indices map filter()/select() leave behind.
+    """
+    col = ds.data.column(name)
+    if ds._indices is not None:
+        col = col.take(ds._indices.column(0))
+    return col.to_numpy(zero_copy_only=False)
+
+
+def _describes_rows(table: dict, smiles: list[str]) -> bool:
+    """
+    Whether ``table`` was built from exactly ``smiles``.
+    """
+    return list(table["smiles"]) == smiles
+
+
+def _cached_graph_table(path: str | PathLike, ds: Dataset) -> dict | None:
+    """The graph table cached beside a saved dataset, if it still describes it."""
+    cache = Path(path) / _GRAPH_TABLE_FILE
+    if not cache.is_file():
+        return None
+    table = graphs.load(cache)
+    smiles = ds.data.column("smiles").to_numpy(zero_copy_only=False).tolist()
+    if not _describes_rows(table, smiles):
+        tqdm.write(f"  ignoring {_GRAPH_TABLE_FILE}: it describes different molecules")
+        return None
+    return table
 
 
 class MoleculeDataset(torch.utils.data.Dataset):
@@ -251,13 +287,27 @@ class MoleculeDataset(torch.utils.data.Dataset):
             os.unlink(path)
 
     @classmethod
-    def _create(cls, ds: Dataset) -> "MoleculeDataset":
+    def _create(cls, ds: Dataset, graph_table: dict | None = None) -> "MoleculeDataset":
         """
         Private initialization helper method.
         """
         obj = object.__new__(cls)
         obj.ds = ds.with_format("torch")
+        obj.has_graphs = all(
+            f"{_GRAPH_PREFIX}{k}" in ds.column_names for k in MoleculeToGraph.KEYS
+        )
+        obj._adopt_graph_table(None)
+        if graph_table is not None:
+            obj._adopt_graph_table(graph_table)
+        elif obj.has_graphs:
+            obj._adopt_graph_table(obj._build_graph_table())
         return obj
+
+    def _adopt_graph_table(self, table: dict | None) -> None:
+        """Store a packed table, together with the row offsets derived from it."""
+        self._graph_table = table
+        self._nptr = table["nptr"].tolist() if table else []
+        self._bptr = table["bptr"].tolist() if table else []
 
     @classmethod
     def from_disk(cls, path: str | PathLike) -> "MoleculeDataset":
@@ -274,7 +324,8 @@ class MoleculeDataset(torch.utils.data.Dataset):
         -------
         MoleculeDataset
         """
-        return cls._create(Dataset.load_from_disk(str(path)))
+        ds = Dataset.load_from_disk(str(path))
+        return cls._create(ds, graph_table=_cached_graph_table(path, ds))
 
     def save_to(self, path: str | PathLike) -> None:
         """Persist the underlying HF Dataset to disk in a directory of Arrow shards.
@@ -285,6 +336,8 @@ class MoleculeDataset(torch.utils.data.Dataset):
             Destination directory. Loadable via :meth:`from_disk`.
         """
         self.ds.save_to_disk(str(path))
+        if self._graph_table is not None:
+            graphs.save(self._graph_table, Path(path) / _GRAPH_TABLE_FILE)
 
     @staticmethod
     def _recompute_properties(
@@ -469,7 +522,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
                     cache_dir=cache_dir,
                 )
             ds = hf_persist(ds, save_to)
-        return type(self)._create(ds)
+        return type(self)._create(ds, graph_table=self._graph_table)
 
     @staticmethod
     def _add_representation_column(
@@ -550,6 +603,104 @@ class MoleculeDataset(torch.utils.data.Dataset):
             desc=f"Computing {name}",
         )
 
+    def add_graphs(
+        self,
+        *,
+        batch_size: int = 512,
+        num_proc: int = 1,
+        save_to: str | PathLike | None = None,
+        tmp_dir: str | PathLike | None = None,
+    ) -> "MoleculeDataset":
+        """Append molecular-graph columns, the graph counterpart of
+        :meth:`add_representations`.
+
+        Adds four columns to the HF Dataset, one per output of
+        :class:`~metabo_depthcharge.chem.MoleculeToGraph`: ``graph_atom_key`` per
+        atom, and ``graph_bsrc``/``graph_bdst``/``graph_bcode`` per bond.
+        The packed :attr:`graph_table` is built as part of constructing the result
+        and cached beside the dataset when ``save_to`` is given, so a
+        later :meth:`from_disk` reads it instead of rebuilding.
+
+        Parameters
+        ----------
+        batch_size : int, default 512
+            Per-batch row count for :meth:`datasets.Dataset.map`.
+        num_proc : int, default 1
+            Worker count for :meth:`datasets.Dataset.map`.
+        save_to : str or PathLike, optional
+            If given, persist the result to this path. (loadable with
+            :meth:`from_disk`). Pass the same path as the original dataset
+            to update it in place.
+        tmp_dir : str or PathLike, optional
+            Parent directory for the build's transient cache. Defaults to
+            ``$TMPDIR``; override on HPC systems where ``$TMPDIR`` is
+            unset or resolves to a small ``tmpfs``.
+
+        Returns
+        -------
+        MoleculeDataset
+
+        Examples
+        --------
+        .. code-block:: python
+
+            pool = MoleculeDataset.from_disk("pool").add_graphs(
+                num_proc=16, save_to="pool"
+            )
+            enc = GraphMolEncoder(pool.atom_types(), [128, 256, 512], 0.2, 512)
+            loader = DataLoader(pool, batch_size=64, collate_fn=pool.collate)
+            for batch in loader:
+                embeddings = enc(batch["graph"])
+        """
+        in_memory = save_to is None
+        new_cols = {
+            "graph_atom_key": Sequence(Value("int64")),
+            "graph_bsrc": Sequence(Value("uint16")),
+            "graph_bdst": Sequence(Value("uint16")),
+            "graph_bcode": Sequence(Value("uint8")),
+        }
+        gen = MoleculeToGraph()
+
+        def map_batched(batch):
+            rows = gen([Molecule(s) for s in batch["smiles"]])
+            return {f"graph_{k}": [r[k] for r in rows] for k in MoleculeToGraph.KEYS}
+
+        with hf_tempcache(dir=tmp_dir) as cache_dir:
+            ds = self.ds.map(
+                map_batched,
+                batched=True,
+                batch_size=batch_size,
+                num_proc=None if num_proc <= 1 else num_proc,
+                features=Features({**self.ds.features, **new_cols}),
+                keep_in_memory=in_memory,
+                cache_file_name=hf_cache_file(cache_dir, in_memory),
+                new_fingerprint=uuid.uuid4().hex,
+                desc="Computing graphs",
+            )
+            ds = hf_persist(ds, save_to)
+        obj = type(self)._create(ds)
+        if save_to is not None:
+            graphs.save(obj.graph_table, Path(save_to) / _GRAPH_TABLE_FILE)
+        return obj
+
+    def _build_graph_table(self) -> dict:
+        """Fuse this dataset's graph columns into one packed table."""
+        cols = {
+            k: _column(self.ds, f"{_GRAPH_PREFIX}{k}") for k in MoleculeToGraph.KEYS
+        }
+        smiles = _column(self.ds, "smiles").tolist()
+
+        tqdm.write(f"Building graph table for {len(smiles):,} molecules...")
+        rows = [
+            {k: cols[k][i] for k in MoleculeToGraph.KEYS} for i in range(len(smiles))
+        ]
+        table = graphs.pack(rows, smiles)
+        tqdm.write(
+            f"  {len(table['types'])} distinct atom types; save this dataset to reuse "
+            f"the table via its {_GRAPH_TABLE_FILE} instead of rebuilding"
+        )
+        return table
+
     def col_to_numpy(self, name: str) -> np.ndarray:
         """Return a dataset column as a numpy array.
 
@@ -562,7 +713,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
         -------
         np.ndarray
         """
-        return self.ds.data.column(name).to_numpy(zero_copy_only=False)
+        return _column(self.ds, name)
 
     def filter(self, condition: Callable[[dict], bool], **kwargs) -> "MoleculeDataset":
         """Return a new dataset keeping only rows where ``condition`` is truthy.
@@ -621,7 +772,62 @@ class MoleculeDataset(torch.utils.data.Dataset):
         return len(self.ds)
 
     def __getitem__(self, i: int) -> dict:
-        return self.ds[i]
+        row = self.ds[i]
+        if self.has_graphs:
+            row = {k: v for k, v in row.items() if not k.startswith(_GRAPH_PREFIX)}
+            row["graph"] = self.graph_slice(i)
+        return row
+
+    @property
+    def graph_table(self) -> dict:
+        """The packed graph table, built when the dataset is created."""
+        if self._graph_table is None:
+            raise ValueError("run add_graphs() first; this dataset has no graphs")
+        return self._graph_table
+
+    def graph_slice(self, i: int) -> dict:
+        """One molecule's graph, as a view into :attr:`graph_table`.
+
+        Parameters
+        ----------
+        i : int
+            Row number.
+
+        Returns
+        -------
+        dict
+            ``atom_type`` for this molecule's atoms and ``bsrc``/``bdst``/``bcode``
+            for its bonds -- slices of the table rather than copies.
+        """
+        t = self.graph_table
+        lo, hi = self._nptr[i], self._nptr[i + 1]
+        blo, bhi = self._bptr[i], self._bptr[i + 1]
+        return {
+            "atom_type": t["atom_type"][lo:hi],
+            "bsrc": t["bsrc"][blo:bhi],
+            "bdst": t["bdst"][blo:bhi],
+            "bcode": t["bcode"][blo:bhi],
+        }
+
+    def gather_graphs(self, indices) -> dict:
+        """Many molecules' graphs as one batch, by row number.
+
+        Parameters
+        ----------
+        indices : torch.Tensor
+            ``(K,)`` row numbers. Repeats are allowed.
+
+        Returns
+        -------
+        dict
+            A batched graph, as :func:`~metabo_depthcharge.chem.graphs.collate`
+            returns.
+        """
+        return graphs.gather(self.graph_table, torch.as_tensor(indices))
+
+    def atom_types(self) -> torch.Tensor:
+        """The ``(n_types, FEAT_DIM)`` atom-feature table a graph encoder needs."""
+        return self.graph_table["types"]
 
     @staticmethod
     def _densify(
@@ -645,7 +851,11 @@ class MoleculeDataset(torch.utils.data.Dataset):
     @staticmethod
     def collate(batch: list[dict]) -> dict:
         """Stack/densify a batch of rows into batched torch tensors.
+
         Pass as ``collate_fn`` to :class:`torch.utils.data.DataLoader`.
+        Fingerprint columns are stacked (and densified from their sparse storage).
+        A ``graph`` from each row is fused into one batched graph under the same key,
+        ready for a graph encoder. Anything else is passed through as a list.
         """
         out = {"smiles": [r["smiles"] for r in batch]}
         skip = {"smiles"}
@@ -669,6 +879,9 @@ class MoleculeDataset(torch.utils.data.Dataset):
                 )
                 skip.add(name)
                 skip.add(f"{name}_values")
+        if "graph" in batch[0]:
+            out["graph"] = graphs.collate([r["graph"] for r in batch])
+            skip.add("graph")
         for k in batch[0]:
             if k in skip:
                 continue

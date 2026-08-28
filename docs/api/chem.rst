@@ -2,7 +2,7 @@ Chem
 ====
 
 ``metabo_depthcharge.chem`` provides per-molecule primitives: a canonicalizing
-``Molecule`` wrapper, fingerprint/embedding representation generators, and
+``Molecule`` wrapper, fingerprint/embedding/graph representation generators, and
 molecular similarity measures.
 
 .. currentmodule:: metabo_depthcharge.chem
@@ -29,6 +29,7 @@ Representations
    MoleculeToMolFormer
    MoleculeToChemBERTa
    MoleculeToSAFEGPT
+   MoleculeToGraph
 
 Similarities
 ------------
