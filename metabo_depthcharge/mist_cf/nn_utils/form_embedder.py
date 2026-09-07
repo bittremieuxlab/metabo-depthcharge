@@ -132,9 +132,10 @@ class LearnedFeaturizer(IntFeaturizer):
 
 
 class FloatFeaturizer(IntFeaturizer):
-    def __init__(self):
+    def __init__(self, norm=None):
         super().__init__(embedding_dim=1)
-        self.norm_vec = torch.from_numpy(common.NORM_VEC).float()
+        norm = common.NORM_VEC if norm is None else norm
+        self.norm_vec = torch.as_tensor(norm).float()
         self.norm_vec = nn.Parameter(self.norm_vec)
         self.norm_vec.requires_grad = False
 
@@ -147,8 +148,16 @@ class FloatFeaturizer(IntFeaturizer):
     def num_dim(self):
         return 1
 
+    @property
+    def full_dim(self):
+        return self.norm_vec.shape[0]
 
-def get_embedder(embedder):
+
+def get_embedder(embedder, norm=None):
+    if embedder == "float":
+        return FloatFeaturizer(norm=norm)
+    if norm is not None:
+        raise ValueError(f"norm is only supported for embedder='float', got {embedder!r}")
     if embedder == "fourier":
         embedder = FourierFeaturizer()
     elif embedder == "rbf":
@@ -157,8 +166,6 @@ def get_embedder(embedder):
         embedder = OneHotFeaturizer()
     elif embedder == "learnt":
         embedder = LearnedFeaturizer()
-    elif embedder == "float":
-        embedder = FloatFeaturizer()
     elif embedder == "fourier-sines":
         embedder = FourierFeaturizerSines()
     elif embedder == "abs-sines":

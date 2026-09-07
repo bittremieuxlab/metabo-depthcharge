@@ -1,11 +1,14 @@
 import warnings
+from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
 from depthcharge.encoders import FloatEncoder
 from depthcharge.transformers import SpectrumTransformerEncoder
+from torch.nn import functional
 
 from metabo_depthcharge.encoders.nn import AttnAggregator
+from metabo_depthcharge.mist_cf.common.chem_utils import VALID_ELEMENTS
 from metabo_depthcharge.mist_cf.nn_utils import get_embedder
 from metabo_depthcharge.spec.adducts import N_ADDUCTS
 from metabo_depthcharge.spec.metadata_parsers import (
@@ -163,6 +166,9 @@ class PeakEncoder(nn.Module):
         Minimum wavelength for m/z sinusoidal encoding.
     max_mz_wavelength : float
         Maximum wavelength for m/z sinusoidal encoding.
+    use_mz : bool, default True
+        Include the m/z encoding in the summed output. ``False`` means only intensity
+        is encoded.
 
     References
     ----------
@@ -172,10 +178,15 @@ class PeakEncoder(nn.Module):
     """
 
     def __init__(
-        self, d_model: int, min_mz_wavelength: float, max_mz_wavelength: float
+        self,
+        d_model: int,
+        min_mz_wavelength: float,
+        max_mz_wavelength: float,
+        use_mz: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
+        self.use_mz = use_mz
 
         self.mz_encoder = FloatEncoder(
             d_model=self.d_model,
@@ -207,7 +218,10 @@ class PeakEncoder(nn.Module):
         torch.Tensor
             ``(B, L, d_model)`` float tensor.
         """
-        return self.mz_encoder(x[:, :, 0]) + self.int_encoder(x[:, :, 1])
+        out = self.int_encoder(x[:, :, 1])
+        if self.use_mz:
+            out = out + self.mz_encoder(x[:, :, 0])
+        return out
 
 
 class SpectrumEncoder(SpectrumTransformerEncoder):
@@ -245,7 +259,22 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
         before the transformer.
     metadata_encoder : nn.Module, optional
         :class:`MetadataEncoder` whose output is added to the global/CLS
-        token before the transformer.
+        token before the transformer. Requires ``use_global_token=True``.
+    use_mz : bool, default True
+        Whether to include sinusoidal m/z in the peak embeddings and precursor token.
+        Set ``False`` to build peak tokens from intensity and formulae alone, so that
+        m/z never enters as a number. Requires a ``subformula_encoder``.
+    use_global_token : bool, default True
+        If ``True``, prepends a CLS token to the peak sequence. It carries:
+
+        - a learned CLS embedding
+        - the precursor m/z sinusoidal encoding (if ``use_mz=True``)
+        - the metadata embedding (if ``metadata_encoder`` is given)
+
+        If ``False``, no global token is prepended and the transformer sees
+        only peak tokens.
+    norm_first : bool, default False
+        Use a pre-norm transformer stack.
     causal : bool, default False
         If ``True``, applies a causal (lower-triangular) self-attention mask:
         the global/precursor token attends only to itself, and token at position
@@ -265,6 +294,9 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
         subformula_encoder: nn.Module | None = None,
         metadata_encoder: nn.Module | None = None,
         causal: bool = False,
+        use_mz: bool = True,
+        use_global_token: bool = True,
+        norm_first: bool = False,
     ):
         super().__init__(
             d_model=d_model,
@@ -276,10 +308,23 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
                 d_model,
                 min_mz_wavelength=min_mz_wavelength,
                 max_mz_wavelength=max_mz_wavelength,
+                use_mz=use_mz,
             ),
         )
 
-        self.precursor_cls = nn.Embedding(1, d_model)
+        if norm_first:
+            layer = nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=d_model * 4,
+                dropout=dropout,
+                batch_first=True,
+                norm_first=True,
+            )
+            self.transformer_encoder = nn.TransformerEncoder(layer, n_layers)
+        self.norm_first = norm_first
+
+        self.precursor_cls = nn.Embedding(1, d_model) if use_global_token else None
 
         if pool not in ("attention", "cls", "last", None):
             raise ValueError(f"Unknown pool mode: {pool}")
@@ -290,6 +335,21 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
         self.causal = causal
 
         self.subformula_encoder = subformula_encoder
+
+        if metadata_encoder is not None and not use_global_token:
+            raise ValueError(
+                "metadata_encoder needs use_global_token=True -- metadata is always "
+                "added to the global/CLS token"
+            )
+        if not use_global_token and pool == "cls":
+            raise ValueError("pool='cls' needs use_global_token=True")
+        if not use_mz and subformula_encoder is None:
+            raise ValueError(
+                "use_mz=False with no subformula_encoder leaves peaks with no "
+                "m/z embedding path at all"
+            )
+        self.use_mz = use_mz
+        self.use_global_token = use_global_token
         self.metadata_encoder = metadata_encoder
 
     def forward(
@@ -317,9 +377,7 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
         metadata : dict[str, torch.Tensor], optional
             Dict of metadata tensors (see :class:`MetadataEncoder` for the
             accepted keys). Passed to :class:`MetadataEncoder` if instantiated,
-            and its ``(B, d_model)`` output is added to the global/CLS token
-            (prepended at index 0, alongside the learned CLS embedding and the
-            precursor-m/z encoding) before the transformer.
+            and added to the global/CLS token before the transformer.
 
         Returns
         -------
@@ -328,37 +386,36 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
 
             - ``pool in {"attention", "cls", "last"}`` — a ``(B, d_model)``
               float tensor of spectrum embeddings.
-            - ``pool is None`` — an ``(out, padding_mask)`` tuple, where ``out`` is a
-              ``(B, L + 1, d_model)`` tensor (global token at index 0 followed
-              by the peak tokens) and ``padding_mask`` is a ``(B, L + 1)`` bool
-              tensor with ``True`` marking padded positions.
+            - ``pool is None`` — an ``(out, padding_mask)`` tuple of a
+              ``(B, T, d_model)`` tensor and a ``(B, T)`` bool mask with ``True``
+              marking padded positions. ``T`` is ``L`` plus one for the global
+              token when ``use_global_token`` is set.
         """
         spectra = torch.stack([mz, intensity], dim=2)
 
         src_key_padding_mask = spectra.sum(dim=2) == 0
-        global_token_mask = torch.tensor([[False]] * spectra.shape[0]).type_as(
-            src_key_padding_mask
-        )
-        src_key_padding_mask = torch.cat(
-            [global_token_mask, src_key_padding_mask], dim=1
-        )
 
         peaks = self.peak_encoder(spectra)
-
         if self.subformula_encoder is not None and subformulae is not None:
             peaks = peaks + self.subformula_encoder(
-                subformulae["form_vec"], subformulae["parent_form_vec"]
+                subformulae["form_vec"],
+                subformulae["parent_form_vec"],
             )
 
-        latent_spectra = self.global_token_hook(
-            mz_array=mz, intensity_array=intensity, precursor_mzs=precursor_mz
-        )
-
-        # Add metadata embedding to the global/CLS token
-        if self.metadata_encoder is not None and metadata is not None:
-            latent_spectra = latent_spectra + self.metadata_encoder(metadata)
-
-        peaks = torch.cat([latent_spectra[:, None, :], peaks], dim=1)
+        if self.use_global_token:
+            latent_spectra = self.global_token_hook(
+                mz_array=mz, intensity_array=intensity, precursor_mzs=precursor_mz
+            )
+            if self.metadata_encoder is not None and metadata is not None:
+                latent_spectra = latent_spectra + self.metadata_encoder(metadata)
+            peaks = torch.cat([latent_spectra[:, None, :], peaks], dim=1)
+            src_key_padding_mask = torch.cat(
+                [
+                    src_key_padding_mask.new_zeros(spectra.shape[0], 1),
+                    src_key_padding_mask,
+                ],
+                dim=1,
+            )
 
         if self.causal:
             seq_len = peaks.shape[1]
@@ -394,8 +451,9 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
         """Build the initial global token embedding for a batch of spectra.
 
         Sums a learned CLS embedding with the sinusoidal encoding of the
-        precursor m/z. Called internally by :meth:`forward` where the result
-        is prepended to the peak embeddings.
+        precursor m/z (if ``use_mz=True``).
+        Called internally by :meth:`forward` where the
+        result is prepended to the peak embeddings.
 
         Parameters
         ----------
@@ -415,20 +473,54 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
         precursor_cls_embedding = self.precursor_cls(
             torch.tensor([[0]]).to(mz_array.device)
         )[0].expand(len(mz_array), -1)
+        if not self.use_mz:
+            return precursor_cls_embedding
         precursor_mz_embedding = self.peak_encoder.mz_encoder(precursor_mzs[:, None])[
             :, 0
         ]
         return precursor_cls_embedding + precursor_mz_embedding
 
 
+FLARE_ELEMENT_NORM = {
+    "H": 102.0,
+    "C": 59.0,
+    "O": 25.0,
+    "N": 13.0,
+    "P": 3.0,
+    "S": 6.0,
+    "Cl": 6.0,
+    "F": 17.0,
+    "Br": 4.0,
+    "I": 4.0,
+    "B": 1.0,
+    "As": 1.0,
+    "Si": 5.0,
+    "Se": 2.0,
+}
+
+
+def _resolve_float_norm(float_norm: str | Sequence[float]) -> Sequence[float] | None:
+
+    if float_norm == "flare":
+        return [FLARE_ELEMENT_NORM.get(el, 1.0) for el in VALID_ELEMENTS]
+    if float_norm == "mistcf":
+        return None  # FloatFeaturizer's own default is MIST-CF's common.NORM_VEC.
+    if isinstance(float_norm, str):
+        raise ValueError(
+            f"Unknown float_norm preset: {float_norm!r} "
+            "(use 'flare', 'mistcf', or a sequence of floats)"
+        )
+    return float_norm
+
+
 class SubformulaEncoder(nn.Module):
     """Encode peak subformulae into ``d_model``-dimensional embeddings.
 
     Follows the MIST-CF approach: embeds each peak's subformula bag-of-atoms
-    and its complement (``parent_formula - subformula``), concatenates both
-    embeddings, and linearly projects to ``d_model``. The output is additively combined with
-    :class:`PeakEncoder` output inside :class:`SpectrumEncoder` to make up final
-    peak embeddings.
+    and (optionally) its complement (``parent_formula - subformula``),
+    concatenates both embeddings, and projects to ``d_model``. The output is
+    additively combined with :class:`PeakEncoder` output inside
+    :class:`SpectrumEncoder` to make up final peak embeddings.
 
     The bag-of-atoms vectors consumed by :meth:`forward` (``form_vec`` and
     ``parent_form_vec``) are built from formula strings by
@@ -451,24 +543,69 @@ class SubformulaEncoder(nn.Module):
         - ``"rbf"`` — ``RBFFeaturizer``
         - ``"one-hot"`` — ``OneHotFeaturizer``
         - ``"learnt"`` — ``LearnedFeaturizer``
-        - ``"float"`` — ``FloatFeaturizer``
+        - ``"float"`` — ``FloatFeaturizer``: plain per-element normalization
+          (``count / norm``), no basis expansion. See ``float_norm``.
 
         These featurizers are vendored under
         `metabo_depthcharge.mist_cf.nn_utils.form_embedder
         <https://github.com/bittremieuxlab/metabo-depthcharge/blob/main/metabo_depthcharge/mist_cf/nn_utils/form_embedder.py>`_
         from MIST-CF
         (`samgoldman97/mist-cf <https://github.com/samgoldman97/mist-cf>`_).
+    use_complement : bool, default True
+        If ``False``, the parent-complement half of the embedding is skipped
+        (so the input to the projection/MLP head is half as wide).
+        Every peak token otherwise carries the precursor formula
+        exactly, which is a whole-spectrum constant.
+    float_norm : {"flare", "mistcf"} or sequence of float, default "flare"
+        Per-element divisor used when ``form_embedder="float"`` (ignored
+        otherwise): ``"flare"`` uses FLARE's normalization constants,
+        ``"mistcf"`` uses MIST-CF's `common.NORM_VEC``,
+        or pass a sequence of floats directly for a custom norm
+        (in the same element order as the ``form_vec`` tensors).
+    mlp_dims : tuple[int, ...], optional
+        If given, the formula embedding is projected to ``d_model`` through an
+        MLP with these hidden widths (ReLU + dropout between layers, no final
+        activation) instead of a single linear layer. The last entry must
+        equal ``d_model``.
+    mlp_dropout : float, default 0.2
+        Dropout between the ``mlp_dims`` layers. Unused without ``mlp_dims``.
     """
 
-    def __init__(self, d_model: int, form_embedder: str = "abs-sines"):
+    def __init__(
+        self,
+        d_model: int,
+        form_embedder: str = "abs-sines",
+        use_complement: bool = True,
+        float_norm: str | Sequence[float] = "flare",
+        mlp_dims: tuple[int, ...] | None = None,
+        mlp_dropout: float = 0.2,
+    ):
         super().__init__()
-        self.form_encoder = get_embedder(form_embedder)
-        self.proj = nn.Linear(self.form_encoder.full_dim * 2, d_model)
+        self.form_embedder = form_embedder
+        self.use_complement = use_complement
+        norm = _resolve_float_norm(float_norm) if form_embedder == "float" else None
+        self.form_encoder = get_embedder(form_embedder, norm=norm)
+
+        in_dim = self.form_encoder.full_dim * (2 if use_complement else 1)
+        if mlp_dims is None:
+            self.proj = nn.Linear(in_dim, d_model)
+            self.layers = None
+        else:
+            widths = [in_dim, *mlp_dims]
+            if widths[-1] != d_model:
+                raise ValueError(
+                    f"mlp_dims[-1] ({widths[-1]}) must equal d_model ({d_model})"
+                )
+            self.proj = None
+            self.layers = nn.ModuleList(
+                nn.Linear(i, o) for i, o in zip(widths, widths[1:], strict=False)
+            )
+            self.drop = nn.Dropout(mlp_dropout)
 
     def forward(
         self,
         form_vec: torch.Tensor,
-        parent_form_vec: torch.Tensor,
+        parent_form_vec: torch.Tensor | None,
     ) -> torch.Tensor:
         """Encode per-peak subformulae relative to their parent formula.
 
@@ -478,17 +615,28 @@ class SubformulaEncoder(nn.Module):
             ``(B, L, ELEMENT_DIM)`` int tensor — bag-of-atoms per peak.
             See :func:`~metabo_depthcharge.spec.subformulae.formula_to_dense` for how to obtain this
             from a formula string.
-        parent_form_vec : torch.Tensor
+        parent_form_vec : torch.Tensor, optional
             ``(B, ELEMENT_DIM)`` int tensor — parent molecular formula.
             See :func:`~metabo_depthcharge.spec.subformulae.formula_to_dense` for how to obtain this
-            from a formula string.
+            from a formula string. Unused when ``use_complement=False``.
 
         Returns
         -------
         torch.Tensor
             ``(B, L, d_model)`` float tensor to be added to peak embeddings.
         """
-        diff_vec = parent_form_vec[:, None, :] - form_vec  # (B, L, ELEMENT_DIM)
         form_emb = self.form_encoder(form_vec)  # (B, L, full_dim)
-        diff_emb = self.form_encoder(diff_vec)  # (B, L, full_dim)
-        return self.proj(torch.cat([form_emb, diff_emb], dim=-1))  # (B, L, d_model)
+        if self.use_complement:
+            diff_vec = parent_form_vec[:, None, :] - form_vec  # (B, L, ELEMENT_DIM)
+            diff_emb = self.form_encoder(diff_vec)  # (B, L, full_dim)
+            x = torch.cat([form_emb, diff_emb], dim=-1)
+        else:
+            x = form_emb
+
+        if self.proj is not None:
+            return self.proj(x)
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+            if i < len(self.layers) - 1:
+                x = self.drop(functional.relu(x))
+        return x
