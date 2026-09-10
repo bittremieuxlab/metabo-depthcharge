@@ -587,7 +587,7 @@ def assign_single_spec(spec_name, export_dicts, output_dir):
         from pathlib import Path
 
         with open(Path(output_dir) / f"{spec_name}.json", "w") as f:
-            json.dump(res_dict, f, indent=4)
+            json.dump(res_dict, f, separators=(",", ":"))
     return res_dict
 
 

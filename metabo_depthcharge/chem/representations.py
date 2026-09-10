@@ -6,9 +6,9 @@ from collections.abc import Iterable
 import numpy as np
 import torch
 from biosynfoni import Biosynfoni
-from map4 import MAP4
 from rdkit import Chem
 from rdkit.Chem import AllChem, DataStructs
+from skfp.fingerprints import MAPFingerprint
 from transformers import AutoModel, AutoTokenizer
 
 from metabo_depthcharge.chem import graphs
@@ -215,7 +215,8 @@ class MoleculeToBiosynfoni:
 class MoleculeToMAP4:
     """MAP4 MinHashed atom-pair fingerprint.
 
-    Computed via the `map4 <https://pypi.org/project/map4/>`_ package.
+    Computed via `scikit-fingerprints
+    <https://github.com/MLCIL/scikit-fingerprints>`_'.
 
     Parameters
     ----------
@@ -226,12 +227,11 @@ class MoleculeToMAP4:
     """
 
     def __init__(self, rep_size: int = 4096, radius: int = 2):
-        self.map_calc = MAP4(
-            dimensions=rep_size, radius=radius, include_duplicated_shingles=False
+        self.map_calc = MAPFingerprint(
+            fp_size=rep_size, radius=radius, include_duplicated_shingles=False
         )
         self.rep_size = rep_size
 
-    @_batched
     def __call__(self, mol: Molecule | Iterable[Molecule]) -> np.ndarray:
         """Compute the MAP4 fingerprint.
 
@@ -246,10 +246,12 @@ class MoleculeToMAP4:
             ``(rep_size,)`` for a single molecule, or ``(N, rep_size)`` for an
             iterable of ``N`` molecules.
         """
-        # MAP4 shingles inherit the parsed mol's kekulization state, so re-parse
-        # from the canonical SMILES (via the same helper Molecule.mol uses) to
-        # keep the fingerprint invariant to the input SMILES dialect.
-        return self.map_calc.calculate(_lenient_mol_from_smiles(mol.canonical_smiles))
+        single = isinstance(mol, Molecule)
+        mols = [mol] if single else list(mol)
+        fps = self.map_calc.transform(
+            [_lenient_mol_from_smiles(m.canonical_smiles) for m in mols]
+        )
+        return fps[0] if single else fps
 
 
 class _HFEmbedder:
