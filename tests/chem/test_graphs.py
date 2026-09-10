@@ -1,7 +1,5 @@
 """Tests for molecular graph featurization."""
 
-import itertools
-
 import numpy as np
 import pytest
 import torch
@@ -19,37 +17,88 @@ def _table(smiles=SMILES):
 def test_featurize_shapes(aspirin_mol):
     out = graphs.featurize(aspirin_mol.mol)
     mol = aspirin_mol.mol
-    assert out["atom_key"].shape == (mol.GetNumAtoms(),)
+    assert out["atom_code"].shape == (mol.GetNumAtoms(),)
     for key in ("bsrc", "bdst", "bcode"):
         assert out[key].shape == (mol.GetNumBonds(),)
 
 
-def test_atom_key_is_stable_and_row_determined(aspirin_mol):
-    """Same feature row -> same key; the key must not depend on anything else."""
+def test_atom_code_is_stable_and_a_pure_function_of_the_atom(aspirin_mol):
+    """Same atom, called twice, or reached via a totally different molecule -> same code."""
     atoms = list(aspirin_mol.mol.GetAtoms())
-    keys = [graphs.atom_key(a) for a in atoms]
-    assert keys == [graphs.atom_key(a) for a in atoms]  # deterministic
-    rows = [tuple(graphs.atom_features(a)) for a in atoms]
-    for i, j in itertools.combinations(range(len(atoms)), 2):
-        assert (keys[i] == keys[j]) == (rows[i] == rows[j])
+    codes = [graphs.atom_code(a) for a in atoms]
+    assert codes == [graphs.atom_code(a) for a in atoms]  # deterministic
+
+    # A plain, unsubstituted aromatic CH ring carbon codes identically whether it
+    # comes from plain benzene or from one of aspirin's unsubstituted ring
+    # positions -- nothing about atom_code depends on which molecule, or which
+    # dataset, an atom is drawn from.
+    def _plain_ring_ch(mol):
+        return next(
+            a
+            for a in mol.GetAtoms()
+            if a.GetIsAromatic() and a.GetDegree() == 2 and a.GetTotalNumHs() == 1
+        )
+
+    benzene_ch = _plain_ring_ch(Molecule("c1ccccc1CC").mol)
+    aspirin_ch = _plain_ring_ch(aspirin_mol.mol)
+    assert graphs.atom_code(benzene_ch) == graphs.atom_code(aspirin_ch)
 
 
-def test_atom_types_reconstruct_feature_rows_exactly():
-    """The type table is what the encoder actually consumes -- it must be lossless."""
-    mols = [Molecule(s).mol for s in SMILES]
-    table = _table()
-    types, nptr = table["types"].numpy(), table["nptr"].numpy()
-    ids = table["atom_type"].numpy()
-    for m, mol in enumerate(mols):
-        for a, atom in enumerate(mol.GetAtoms()):
+def test_atom_code_never_raises_for_any_molecule():
+    """The whole point: no vocabulary to be unseen from -- exotic atoms just code."""
+    for smiles in [
+        "[Na+].[Cl-]",
+        "[Se]",
+        "C[As](C)(C)=O",
+        "[13C]C",
+        "[2H]C([2H])([2H])O",
+    ]:
+        for atom in Molecule(smiles).mol.GetAtoms():
+            graphs.atom_code(atom)  # must not raise
+
+
+def test_decode_atom_codes_reconstructs_feature_rows_exactly():
+    """Round-tripping through atom_code/decode_atom_codes must be lossless for any
+    atom whose element is known and not isotope-labeled -- the model actually
+    consumes the decoded row, so it has to match atom_features exactly."""
+    for smiles in (
+        "CCO",
+        "c1ccccc1",
+        "CC(=O)Oc1ccccc1C(=O)O",
+        "CN1C=NC2=C1C(=O)N(C)C(=O)N2C",
+    ):
+        mol = Molecule(smiles).mol
+        for atom in mol.GetAtoms():
             want = np.asarray(graphs.atom_features(atom), dtype=np.float32)
-            assert np.array_equal(types[ids[nptr[m] + a]], want)
+            code = torch.tensor([graphs.atom_code(atom)])
+            got = graphs.decode_atom_codes(code)[0].numpy()
+            assert np.allclose(want, got, atol=1e-4), atom.GetSymbol()
 
 
-def test_atom_types_are_few():
-    """The whole point: a handful of distinct rows across many atoms."""
-    table = _table()
-    assert len(table["types"]) < len(table["atom_type"])
+def test_decode_atom_codes_approximates_mass_for_an_unknown_element():
+    """Na isn't in ELEMENTS, so its mass can't be recovered from the element index
+    alone -- decode falls back to 0.0 rather than silently guessing wrong, while
+    every other (categorical) field still matches exactly."""
+    atom = next(
+        a for a in Molecule("[Na+].[Cl-]").mol.GetAtoms() if a.GetSymbol() == "Na"
+    )
+    want = np.asarray(graphs.atom_features(atom), dtype=np.float32)
+    got = graphs.decode_atom_codes(torch.tensor([graphs.atom_code(atom)]))[0].numpy()
+    assert np.allclose(want[1:], got[1:], atol=1e-4)  # every field but mass
+    assert got[0] == 0.0
+    assert want[0] != 0.0
+
+
+def test_same_atom_codes_the_same_across_independently_built_tables():
+    """The property align_atom_types used to have to restore by hand: two tables
+    built from completely different molecule sets agree on an atom's code without
+    any alignment step."""
+    small = _table(["CCO"])
+    large = _table(SMILES)
+    small_carbon = small["atom_type"][small["nptr"][0]].item()  # CCO's first atom, C
+    # find the same kind of atom (an ethanol-like sp3 C-C-O carbon) in the big table
+    large_codes = large["atom_type"].tolist()
+    assert small_carbon in large_codes
 
 
 def test_expand_bonds_matches_explicit_construction():
@@ -92,7 +141,7 @@ def test_bond_codes_never_collide_with_the_self_loop_code():
 def test_atom_with_no_bonds_is_featurizable():
     """A lone counter-ion has no bonds; dgllife's own featurizer raises on these."""
     out = graphs.featurize(Molecule("[Na+].[Cl-]").mol)
-    assert len(out["atom_key"]) == 2
+    assert len(out["atom_code"]) == 2
     assert len(out["bsrc"]) == 0
 
 
@@ -116,7 +165,7 @@ def test_pack_rejects_mismatched_smiles():
 def test_single_molecule_returns_its_own_arrays(aspirin_mol):
     out = MoleculeToGraph()(aspirin_mol)
     assert set(out) == set(MoleculeToGraph.KEYS)
-    assert out["atom_key"].shape[0] == aspirin_mol.mol.GetNumAtoms()
+    assert out["atom_code"].shape[0] == aspirin_mol.mol.GetNumAtoms()
 
 
 def test_batched_call_matches_single_calls():
@@ -135,7 +184,6 @@ def test_save_load_round_trip(tmp_path):
     back = graphs.load(path)
     assert back["smiles"] == table["smiles"]
     assert torch.equal(back["atom_type"], table["atom_type"])
-    assert torch.equal(back["types"], table["types"])
 
 
 def test_load_rejects_a_table_missing_keys(tmp_path):

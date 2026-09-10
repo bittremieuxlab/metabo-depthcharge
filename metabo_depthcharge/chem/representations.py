@@ -89,7 +89,7 @@ class MoleculeToGraph:
     """
 
     #: Per-molecule array names this produces.
-    KEYS = ("atom_key", "bsrc", "bdst", "bcode")
+    KEYS = ("atom_code", "bsrc", "bdst", "bcode")
 
     @_batched_list
     def __call__(
@@ -107,10 +107,10 @@ class MoleculeToGraph:
         dict or list of dict
             One dict per molecule (a list of them for an iterable), holding:
 
-            ``atom_key`` : ``(n_atoms,)`` int64
-                One :func:`~metabo_depthcharge.chem.graphs.atom_key` per atom.
+            ``atom_code`` : ``(n_atoms,)`` int64
+                One :func:`~metabo_depthcharge.chem.graphs.atom_code` per atom.
             ``bsrc``, ``bdst`` : ``(n_bonds,)`` uint16
-                The two atoms of each bond, as positions in ``atom_key``.
+                The two atoms of each bond, as positions in ``atom_code``.
                 Reverse edges and self-loops are not included but built internally
                 by :func:`~metabo_depthcharge.chem.graphs.expand_bonds`.
             ``bcode`` : ``(n_bonds,)`` uint8

@@ -194,9 +194,6 @@ class GraphMolEncoder(nn.Module):
 
     Parameters
     ----------
-    atom_types : torch.Tensor
-        ``(n_types, FEAT_DIM)`` table of distinct atom feature rows, from
-        :meth:`~metabo_depthcharge.datasets.MoleculeDataset.atom_types`.
     channels : sequence of int
         Output width of each graph-convolution layer.
     dropout : float
@@ -212,7 +209,6 @@ class GraphMolEncoder(nn.Module):
 
     def __init__(
         self,
-        atom_types: torch.Tensor,
         channels: Sequence[int],
         dropout: float,
         d_model: int,
@@ -223,7 +219,6 @@ class GraphMolEncoder(nn.Module):
         if norm not in ("batch", "layer"):
             raise ValueError(f"Unknown norm: {norm}")
         self.per_atom = per_atom
-        self.register_buffer("atom_types", torch.as_tensor(atom_types).float())
 
         dims = [graphs.FEAT_DIM, *channels]
         self.convs = nn.ModuleList(
@@ -246,12 +241,7 @@ class GraphMolEncoder(nn.Module):
     def _unpack(self, graph):
         """A batched graph -> atom rows and batch-local edges."""
         ids = graph["atom_type"].long()
-        if ids.numel() and int(ids.max()) >= len(self.atom_types):
-            raise ValueError(
-                "batch has an atom type id outside this encoder's table; the table "
-                "and the graphs must come from the same dataset"
-            )
-        device = self.atom_types.device
+        device = ids.device
         nsize = torch.diff(graph["nptr"]).to(device)
         bsize = torch.diff(graph["bptr"]).to(device)
         src, dst, ecode, erev = graphs.expand_bonds(
@@ -261,7 +251,7 @@ class GraphMolEncoder(nn.Module):
             graph["bdst"].to(device),
             graph["bcode"].to(device),
         )
-        return self.atom_types[ids.to(device)], nsize, bsize, src, dst, ecode, erev
+        return graphs.decode_atom_codes(ids), nsize, bsize, src, dst, ecode, erev
 
     def forward(self, graph: dict):
         """Encode a batch of molecular graphs.
@@ -335,8 +325,6 @@ class BondMolEncoder(GraphMolEncoder):
 
     Parameters
     ----------
-    atom_types : torch.Tensor
-        ``(n_types, FEAT_DIM)`` atom-feature table; see :class:`GraphMolEncoder`.
     channels : sequence of int
         Output width of each message-passing layer.
     dropout : float
@@ -354,7 +342,6 @@ class BondMolEncoder(GraphMolEncoder):
 
     def __init__(
         self,
-        atom_types: torch.Tensor,
         channels: Sequence[int],
         dropout: float,
         d_model: int,
@@ -362,9 +349,7 @@ class BondMolEncoder(GraphMolEncoder):
         norm: str = "batch",
         bond_tokens: bool = False,
     ):
-        super().__init__(
-            atom_types, channels, dropout, d_model, per_atom=per_atom, norm=norm
-        )
+        super().__init__(channels, dropout, d_model, per_atom=per_atom, norm=norm)
         self.convs, self.res, self.bns = (nn.ModuleList() for _ in range(3))
         self.bond_tokens = bond_tokens
         self.ecodes = nn.ModuleList([nn.Embedding(graphs.N_BOND_CODES, channels[0])])

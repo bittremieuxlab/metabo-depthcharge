@@ -615,7 +615,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
         :meth:`add_representations`.
 
         Adds four columns to the HF Dataset, one per output of
-        :class:`~metabo_depthcharge.chem.MoleculeToGraph`: ``graph_atom_key`` per
+        :class:`~metabo_depthcharge.chem.MoleculeToGraph`: ``graph_atom_code`` per
         atom, and ``graph_bsrc``/``graph_bdst``/``graph_bcode`` per bond.
         The packed :attr:`graph_table` is built as part of constructing the result
         and cached beside the dataset when ``save_to`` is given, so a
@@ -647,14 +647,14 @@ class MoleculeDataset(torch.utils.data.Dataset):
             pool = MoleculeDataset.from_disk("pool").add_graphs(
                 num_proc=16, save_to="pool"
             )
-            enc = GraphMolEncoder(pool.atom_types(), [128, 256, 512], 0.2, 512)
+            enc = GraphMolEncoder([128, 256, 512], 0.2, 512)
             loader = DataLoader(pool, batch_size=64, collate_fn=pool.collate)
             for batch in loader:
                 embeddings = enc(batch["graph"])
         """
         in_memory = save_to is None
         new_cols = {
-            "graph_atom_key": Sequence(Value("int64")),
+            "graph_atom_code": Sequence(Value("int64")),
             "graph_bsrc": Sequence(Value("uint16")),
             "graph_bdst": Sequence(Value("uint16")),
             "graph_bcode": Sequence(Value("uint8")),
@@ -696,8 +696,8 @@ class MoleculeDataset(torch.utils.data.Dataset):
         ]
         table = graphs.pack(rows, smiles)
         tqdm.write(
-            f"  {len(table['types'])} distinct atom types; save this dataset to reuse "
-            f"the table via its {_GRAPH_TABLE_FILE} instead of rebuilding"
+            f"  {len(table['atom_type']):,} atoms; save this dataset to reuse the "
+            f"table via its {_GRAPH_TABLE_FILE} instead of rebuilding"
         )
         return table
 
@@ -824,10 +824,6 @@ class MoleculeDataset(torch.utils.data.Dataset):
             returns.
         """
         return graphs.gather(self.graph_table, torch.as_tensor(indices))
-
-    def atom_types(self) -> torch.Tensor:
-        """The ``(n_types, FEAT_DIM)`` atom-feature table a graph encoder needs."""
-        return self.graph_table["types"]
 
     @staticmethod
     def _densify(

@@ -3,24 +3,21 @@
 Turns RDKit molecules into the flat tensors a message-passing encoder consumes, in a
 format compact enough to keep a very large candidate pool resident in memory.
 
-The compact part rests on one observation: an atom's feature row is categorical.
-:func:`atom_features` returns 78 numbers, but all of them are indicator bits except the
-leading mass, which itself follows from the element and isotope. Distinct rows are
-therefore few -- around a hundred across millions of real atoms -- so the table holds
-each distinct row once and gives every atom a small integer pointing at it. That is two
-bytes per atom rather than the 312 the row itself would cost.
+The compact part rests on one observation: an atom's feature row is categorical. Every
+entry :func:`atom_features` computes but the leading mass is an indicator bit drawn from
+a small, fixed, hardcoded vocabulary (``ELEMENTS``, bond types, degree/valence buckets,
+hybridization, ...) -- and mass itself follows from the element. So a whole row is a
+handful of small integers, and :func:`atom_code` packs them into a single int64.
+:func:`decode_atom_codes` reconstructs the dense row an encoder consumes.
 
 Vocabulary
 ----------
 feature row
     The 78 floats :func:`atom_features` computes for one atom.
-atom key
-    A 64-bit hash of a feature row (:func:`atom_key`). Equal keys mean equal rows. Only
-    an intermediate: it lets the per-molecule stage summarize a row without carrying
-    it, and lets rows computed in separate worker processes be compared.
-atom type id
-    A small integer in ``[0, n_types)`` indexing the ``types`` table that
-    :func:`build_atom_types` builds. This is what is actually stored per atom.
+atom code
+    A single int64 (:func:`atom_code`) a whole feature row packs into: what is
+    actually stored per atom and what :func:`decode_atom_codes` unpacks back into
+    the dense row an encoder consumes.
 packed table
     A whole dataset's graphs as flat tensors plus offsets -- see :data:`TABLE_KEYS`.
 bond vs. edge
@@ -30,24 +27,22 @@ bond vs. edge
 
 Pipeline
 --------
-1. :func:`featurize` -- one molecule at a time, during preprocessing. Emits atom keys
+1. :func:`featurize` -- one molecule at a time, during preprocessing. Emits atom codes
    and bonds, which a dataset stores as columns.
-2. :func:`pack` -- once per dataset. Concatenates every molecule into flat tensors and
-   trades the atom keys for dense atom type ids.
+2. :func:`pack` -- once per dataset. Concatenates every molecule into flat tensors.
 3. :func:`gather` (many rows of a packed table at once) or :func:`collate` (rows a
    DataLoader already fetched) -- once per batch.
-4. :func:`expand_bonds` -- inside the encoder, once per forward pass.
+4. :func:`decode_atom_codes` and :func:`expand_bonds` -- inside the encoder, once per
+   forward pass.
 """
 
-import hashlib
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from os import PathLike
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from rdkit import Chem
-
-from metabo_depthcharge.chem.molecule import _lenient_mol_from_smiles
 
 
 ELEMENTS = ("H", "C", "O", "N", "P", "S", "Cl", "F", "Br", "I", "B", "As", "Si", "Se")
@@ -86,8 +81,7 @@ _CHIRAL_TAGS = (
 #: holding ``A`` atoms and ``B`` bonds in total:
 #:
 #: * ``smiles`` -- list of ``M`` str, the molecule each row came from.
-#: * ``types`` -- ``(n_types, FEAT_DIM)`` float32, every distinct feature row, once.
-#: * ``atom_type`` -- ``(A,)`` uint16, the row of ``types`` each atom has.
+#: * ``atom_type`` -- ``(A,)`` int64, each atom's self-describing :func:`atom_code`.
 #: * ``bsrc``, ``bdst`` -- ``(B,)`` int16, a bond's two atoms, numbered within their own
 #:   molecule rather than across the table.
 #: * ``bcode`` -- ``(B,)`` uint8, each bond's :func:`bond_code`.
@@ -95,7 +89,6 @@ _CHIRAL_TAGS = (
 #:   ``[nptr[i]:nptr[i + 1]]`` and bonds ``[bptr[i]:bptr[i + 1]]``.
 TABLE_KEYS = (
     "smiles",
-    "types",
     "atom_type",
     "bsrc",
     "bdst",
@@ -104,80 +97,52 @@ TABLE_KEYS = (
     "bptr",
 )
 
+#: (name, getter, allowed values, has an explicit "unknown" catch-all slot) for every
+#: pure one-hot field of :func:`atom_features` except the element and bond-types blocks
+#: (handled separately in both :func:`atom_features` and :func:`atom_code` -- element
+#: because :func:`decode_atom_codes` also recovers mass from it, bond types because they
+#: are independent flags rather than "at most one of these"). The single source of truth
+#: both :func:`atom_features` and the compact :func:`atom_code`/:func:`decode_atom_codes`
+#: pack and unpack from, so the two can never quietly drift apart.
+_ONE_HOT_FIELDS = (
+    ("degree", lambda a: a.GetDegree(), tuple(range(11)), False),
+    ("total_degree", lambda a: a.GetTotalDegree(), tuple(range(6)), False),
+    ("explicit_valence", lambda a: a.GetExplicitValence(), tuple(range(1, 7)), False),
+    ("implicit_valence", lambda a: a.GetImplicitValence(), tuple(range(7)), False),
+    ("hybridization", lambda a: a.GetHybridization(), _HYBRIDIZATIONS, False),
+    ("num_hs", lambda a: a.GetTotalNumHs(), tuple(range(5)), False),
+    ("formal_charge", lambda a: a.GetFormalCharge(), tuple(range(-2, 3)), False),
+    ("radical_electrons", lambda a: a.GetNumRadicalElectrons(), tuple(range(5)), False),
+    ("aromatic", lambda a: a.GetIsAromatic(), (False, True), False),
+    ("in_ring", lambda a: a.IsInRing(), (False, True), False),
+    ("chiral_tag", lambda a: a.GetChiralTag(), _CHIRAL_TAGS, False),
+)
 
-def atom_key(atom: Chem.Atom) -> np.int64:
-    """Hash an atom's feature row down to a single integer.
+#: Standard atomic weight per :data:`ELEMENTS`, plus a trailing 0.0 for the "unknown
+#: element" slot -- what :func:`decode_atom_codes` recovers ``atom_features``' leading
+#: mass field from, given only the decoded element index. A fixed property of chemistry
+#: (via RDKit's own periodic table), not of any dataset. The one thing this loses
+#: relative to :func:`atom_features`: an isotope-labeled atom (e.g. deuterium) decodes
+#: to its element's ordinary mass rather than that isotope's exact one.
+_ATOMIC_WEIGHTS = tuple(
+    Chem.GetPeriodicTable().GetAtomicWeight(e) for e in ELEMENTS
+) + (0.0,)
 
-    Parameters
-    ----------
-    atom : rdkit.Chem.Atom
-        The atom to key.
 
-    Returns
-    -------
-    np.int64
-        A digest of the atom's feature row.
+def _index(value, allowed: Sequence) -> int:
+    """0-based position of ``value`` in ``allowed``, or ``len(allowed)`` if absent.
+
+    Either way the result is exactly the index :func:`_one_hot` would set -- a real
+    match, or (for a field without ``unknown=True``) the "no bit set" sentinel one past
+    the end -- so this is the single index space :func:`atom_code` packs and
+    :func:`decode_atom_codes` unpacks each field through.
     """
-    row = np.asarray(atom_features(atom), dtype=np.float32)
-    digest = hashlib.blake2b(row.tobytes(), digest_size=8).digest()
-    # Signed, so that the key sorts and compares identically everywhere it travels.
-    return np.int64(int.from_bytes(digest, "little", signed=True))
+    return allowed.index(value) if value in allowed else len(allowed)
 
 
-def build_atom_types(
-    keys: np.ndarray, exemplars: "Callable[[int], Chem.Atom]"
-) -> tuple[np.ndarray, np.ndarray]:
-    """Replace atom keys with small ids into a table of the distinct feature rows.
-
-    Two things come out. ``types`` is the vocabulary: every feature row occurring
-    anywhere in ``keys``, listed once, so a row that a million atoms share is stored a
-    single time. ``ids`` says which entry of that vocabulary each atom is, such that
-    ``types[ids[i]]`` is exactly the row :func:`atom_features` would return for atom
-    ``i``. Nothing is approximated -- the pair reconstructs the original rows exactly.
-
-    The ids are *dense* in that they run ``0, 1, ... n_types - 1`` with no gaps. Keys
-    are hashes scattered over the whole int64 range and can only be looked up, whereas
-    an id indexes ``types`` directly and fits in two bytes. This is the step that makes
-    a table small, and it needs the entire dataset at once: which row is number 7
-    depends on what else is present.
-
-    Rebuilding the vocabulary needs real feature rows and only hashes were kept, so
-    ``exemplars`` supplies one representative atom per distinct key to recompute from.
-    That is ``n_types`` calls, not ``n_atoms``.
-
-    Parameters
-    ----------
-    keys : np.ndarray
-        ``(n_atoms,)`` int64 of :func:`atom_key` values, concatenated over molecules.
-    exemplars : callable
-        Given a position in ``keys``, returns that atom. Called once per distinct key,
-        at the first position that key appears, to recompute its row with
-        :func:`atom_features`.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        ``types``, the ``(n_types, FEAT_DIM)`` float32 vocabulary, and ``ids``, the
-        ``(n_atoms,)`` uint16 entry of it that each atom maps to.
-
-    Raises
-    ------
-    ValueError
-        If more than 65535 distinct rows occur, which a uint16 id cannot address, or if
-        two different rows hashed to the same key. Real molecules reach neither --
-        around a hundred distinct rows occur across millions of atoms -- but both would
-        silently corrupt every graph in the table, so they are checked rather than
-        assumed.
-    """
-    uniq, first, ids = np.unique(keys, return_index=True, return_inverse=True)
-    if len(uniq) > np.iinfo(np.uint16).max:
-        raise ValueError(f"{len(uniq)} atom types exceeds what a uint16 id can hold")
-    types = np.stack(
-        [np.asarray(atom_features(exemplars(int(i))), dtype=np.float32) for i in first]
-    )
-    if len(np.unique(types, axis=0)) != len(types):
-        raise ValueError("two distinct atom rows hashed to the same key")
-    return types, ids.astype(np.uint16)
+def _nbits(n_states: int) -> int:
+    """Bits needed to represent ``n_states`` distinct non-negative integers."""
+    return max(1, (n_states - 1).bit_length())
 
 
 def expand_bonds(
@@ -288,8 +253,7 @@ def atom_features(atom: Chem.Atom) -> list[float]:
     The sole definition of what a feature row is, and so of :data:`FEAT_DIM`. Every
     entry but the leading mass is an indicator bit, and the mass follows from the
     element and isotope -- which is what makes rows categorical, and so what lets
-    :func:`atom_key` stand in for a whole row and :func:`build_atom_types` store each
-    distinct row only once.
+    :func:`atom_code` pack a whole row into a single small integer.
 
     Parameters
     ----------
@@ -309,31 +273,104 @@ def atom_features(atom: Chem.Atom) -> list[float]:
     # an atom with no bonds at all -- a lone counter-ion, e.g. the "Br." of a
     # hydrobromide. Zeros is the only sensible reading of "no bond type is present".
     bond_types = [any(b.GetBondType() == t for b in bonds) for t in _BOND_TYPES]
-    return (
-        [atom.GetMass() * 0.01]
-        + _one_hot(atom.GetSymbol(), ELEMENTS, unknown=True)
-        + bond_types
-        + _one_hot(atom.GetDegree(), range(11))
-        + _one_hot(atom.GetTotalDegree(), range(6))
-        + _one_hot(atom.GetExplicitValence(), range(1, 7))
-        + _one_hot(atom.GetImplicitValence(), range(7))
-        + _one_hot(atom.GetHybridization(), _HYBRIDIZATIONS)
-        + _one_hot(atom.GetTotalNumHs(), range(5))
-        + _one_hot(atom.GetFormalCharge(), range(-2, 3))
-        + _one_hot(atom.GetNumRadicalElectrons(), range(5))
-        + _one_hot(atom.GetIsAromatic(), [False, True])
-        + _one_hot(atom.IsInRing(), [False, True])
-        + _one_hot(atom.GetChiralTag(), _CHIRAL_TAGS)
+    row = [atom.GetMass() * 0.01]
+    row += _one_hot(atom.GetSymbol(), ELEMENTS, unknown=True)
+    row += bond_types
+    for _, getter, allowed, unknown in _ONE_HOT_FIELDS:
+        row += _one_hot(getter(atom), allowed, unknown=unknown)
+    return row
+
+
+def atom_code(atom: Chem.Atom) -> int:
+    """Pack one atom's categorical fields into a single self-describing integer.
+
+    Every field is drawn from a small, fixed vocabulary already hardcoded in this
+    module (``ELEMENTS``, ``range(11)``, ``_HYBRIDIZATIONS``, ...), so the packed code
+    is a pure function of the atom -- nothing here depends on which dataset the atom
+    came from, or on any other atom being present. The same kind of atom always packs
+    to the same code, anywhere, forever; see :func:`decode_atom_codes` for the inverse
+    and the rationale for replacing the old hash-and-deduplicate scheme with this.
+
+    Parameters
+    ----------
+    atom : rdkit.Chem.Atom
+        The atom to code.
+
+    Returns
+    -------
+    int
+        A non-negative integer under ``2**40``, safe to store as int64.
+    """
+    code = _index(atom.GetSymbol(), ELEMENTS)
+    bonds = atom.GetBonds()
+    for t in _BOND_TYPES:
+        code = (code << 1) | int(any(b.GetBondType() == t for b in bonds))
+    for _, getter, allowed, _unknown in _ONE_HOT_FIELDS:
+        code = (code << _nbits(len(allowed) + 1)) | _index(getter(atom), allowed)
+    return code
+
+
+def decode_atom_codes(codes: torch.Tensor) -> torch.Tensor:
+    """Reconstruct dense feature rows from packed :func:`atom_code` integers.
+
+    A pure, closed-form unpack: no table, no dataset, so it works for any code
+    :func:`atom_code` could ever produce -- a molecule pooled today decodes exactly
+    like one that will be seen for the first time tomorrow. Run inside the encoder,
+    once per batch, in place of the old buffer lookup.
+
+    The one approximation: mass is recovered from the decoded element's *standard*
+    atomic weight (:data:`_ATOMIC_WEIGHTS`), not the atom's own possibly
+    isotope-specific mass -- an isotope-labeled atom (e.g. deuterium) decodes to its
+    element's ordinary mass. Every other field is exact.
+
+    Parameters
+    ----------
+    codes : torch.Tensor
+        ``(A,)`` int64, from :func:`atom_code` (e.g. a table's ``atom_type`` column).
+
+    Returns
+    -------
+    torch.Tensor
+        ``(A, FEAT_DIM)`` float32, matching :func:`atom_features` stacked over the
+        same atoms (mass caveat above aside).
+    """
+    remaining = codes.long()
+    blocks = []
+    for _, _getter, allowed, _unknown in reversed(_ONE_HOT_FIELDS):
+        n = len(allowed)
+        bits = _nbits(n + 1)
+        idx = remaining & ((1 << bits) - 1)
+        remaining = remaining >> bits
+        hit = idx < n
+        onehot = F.one_hot(idx.clamp(max=n - 1), num_classes=n).float()
+        blocks.append(onehot * hit[:, None])
+    blocks.reverse()
+
+    bond_bits = []
+    for _ in _BOND_TYPES:
+        bond_bits.append((remaining & 1).float())
+        remaining = remaining >> 1
+    bond_bits.reverse()
+
+    elem_idx = (
+        remaining  # only the element index is left once every field is peeled off
+    )
+    elem_onehot = F.one_hot(elem_idx, num_classes=len(ELEMENTS) + 1).float()
+    weights = torch.tensor(_ATOMIC_WEIGHTS, dtype=torch.float32, device=codes.device)
+    mass = (weights[elem_idx] * 0.01)[:, None]
+
+    return torch.cat(
+        [mass, elem_onehot, torch.stack(bond_bits, dim=-1), *blocks], dim=-1
     )
 
 
 def featurize(mol: Chem.Mol) -> dict[str, np.ndarray]:
     """Reduce one molecule to the small arrays a packed table is built from.
 
-    Atoms become :func:`atom_key` hashes rather than feature rows, and bonds are kept as
-    the molecule has them -- one entry each, not the self-loops and opposed edges an
-    encoder consumes, which :func:`expand_bonds` adds per batch. Both choices trade a
-    little work at batch time for a table small enough to stay resident.
+    Atoms become :func:`atom_code` integers rather than feature rows, and bonds are
+    kept as the molecule has them -- one entry each, not the self-loops and opposed
+    edges an encoder consumes, which :func:`expand_bonds` adds per batch. Both choices
+    trade a little work at batch time for a table small enough to stay resident.
 
     This is the per-molecule stage: it runs in preprocessing workers, and its output is
     what a dataset stores as columns.
@@ -346,13 +383,13 @@ def featurize(mol: Chem.Mol) -> dict[str, np.ndarray]:
     Returns
     -------
     dict
-        ``atom_key`` ``(n_atoms,)`` int64, one per atom in RDKit's atom order, plus
+        ``atom_code`` ``(n_atoms,)`` int64, one per atom in RDKit's atom order, plus
         ``bsrc``/``bdst`` ``(n_bonds,)`` uint16 -- each bond's two atoms, as positions
         in that order -- and ``bcode`` ``(n_bonds,)`` uint8.
     """
     bonds = list(mol.GetBonds())
     return {
-        "atom_key": np.array([atom_key(a) for a in mol.GetAtoms()], dtype=np.int64),
+        "atom_code": np.array([atom_code(a) for a in mol.GetAtoms()], dtype=np.int64),
         "bsrc": np.array([b.GetBeginAtomIdx() for b in bonds], dtype=np.uint16),
         "bdst": np.array([b.GetEndAtomIdx() for b in bonds], dtype=np.uint16),
         "bcode": np.array([bond_code(b) for b in bonds], dtype=np.uint8),
@@ -366,12 +403,9 @@ def pack(per_molecule: Sequence[dict], smiles: Sequence[str]) -> dict:
     to end and the boundaries recorded in the ``nptr``/``bptr`` offsets, leaving each
     molecule recoverable as a slice. A batch of graphs is then gathered with two
     index-selects instead of a Python loop, which is what makes scoring a large
-    candidate pool tractable.
-
-    This is also where atom keys become dense ids. It is the first point at which the
-    whole dataset is in hand, which is what :func:`build_atom_types` needs to know the
-    full set of distinct rows; recomputing a row means having its atom back, so the
-    SMILES are re-parsed for the one representative atom per distinct key.
+    candidate pool tractable. Purely a concatenation: each atom's code (from
+    :func:`featurize`) already stands on its own, so unlike the old scheme this needs
+    nothing about the dataset as a whole and never re-parses a SMILES.
 
     Parameters
     ----------
@@ -399,20 +433,8 @@ def pack(per_molecule: Sequence[dict], smiles: Sequence[str]) -> dict:
 
     nptr = np.zeros(len(rows) + 1, dtype=np.int64)
     bptr = np.zeros(len(rows) + 1, dtype=np.int64)
-    nptr[1:] = np.cumsum([len(r["atom_key"]) for r in rows])
+    nptr[1:] = np.cumsum([len(r["atom_code"]) for r in rows])
     bptr[1:] = np.cumsum([len(r["bsrc"]) for r in rows])
-    keys = np.concatenate([np.asarray(r["atom_key"], dtype=np.int64) for r in rows])
-
-    def exemplar(pos: int) -> Chem.Atom:
-        """The atom at flat position ``pos``, for recomputing its feature row.
-
-        ``nptr`` says which molecule owns that position; re-parsing gives the atom back.
-        """
-        row = int(np.searchsorted(nptr, pos, side="right") - 1)
-        mol = _lenient_mol_from_smiles(smiles[row])
-        return mol.GetAtomWithIdx(pos - int(nptr[row]))
-
-    types, ids = build_atom_types(keys, exemplar)
 
     def cat(key, dtype):
         return torch.from_numpy(
@@ -421,8 +443,7 @@ def pack(per_molecule: Sequence[dict], smiles: Sequence[str]) -> dict:
 
     return {
         "smiles": smiles,
-        "types": torch.from_numpy(types),
-        "atom_type": torch.from_numpy(ids),
+        "atom_type": cat("atom_code", np.int64),
         "bsrc": cat("bsrc", np.int16),
         "bdst": cat("bdst", np.int16),
         "bcode": cat("bcode", np.uint8),

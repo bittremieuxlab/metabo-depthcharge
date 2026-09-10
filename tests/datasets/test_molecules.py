@@ -369,11 +369,11 @@ def test_add_graphs_adds_columns():
 
 def test_add_graphs_column_lengths_match_the_molecules():
     ds = _graph_ds()
-    keys = ds.col_to_numpy("graph_atom_key")
+    codes = ds.col_to_numpy("graph_atom_code")
     bsrc = ds.col_to_numpy("graph_bsrc")
     for i, smiles in enumerate(GRAPH_SMILES):
         mol = Molecule(smiles).mol
-        assert len(keys[i]) == mol.GetNumAtoms()
+        assert len(codes[i]) == mol.GetNumAtoms()
         assert len(bsrc[i]) == mol.GetNumBonds()
 
 
@@ -388,7 +388,7 @@ def test_add_graphs_round_trips_through_disk(tmp_path):
     path = tmp_path / "ds"
     MoleculeDataset.from_list(GRAPH_SMILES).add_graphs(save_to=path)
     back = MoleculeDataset.from_disk(path)
-    assert "graph_atom_key" in back.ds.column_names
+    assert "graph_atom_code" in back.ds.column_names
     assert back.graph_table["smiles"] == GRAPH_SMILES
 
 
@@ -403,7 +403,7 @@ def test_graph_table_matches_direct_featurization():
     direct = graphs.pack(
         MoleculeToGraph()([Molecule(s) for s in GRAPH_SMILES]), GRAPH_SMILES
     )
-    for key in ("types", "atom_type", "bsrc", "bdst", "bcode", "nptr", "bptr"):
+    for key in ("atom_type", "bsrc", "bdst", "bcode", "nptr", "bptr"):
         assert torch.equal(table[key], direct[key]), key
 
 
@@ -413,12 +413,22 @@ def test_graph_table_requires_add_graphs():
         _ = ds.graph_table
 
 
+def test_two_independently_built_datasets_need_no_alignment():
+    # Two pools built from completely different (here: disjoint-then-overlapping)
+    # molecule sets agree on a shared atom's code without any realignment step --
+    # the property align_atom_types used to have to restore by hand.
+    small = MoleculeDataset.from_list(GRAPH_SMILES[:2]).add_graphs()
+    big = MoleculeDataset.from_list(GRAPH_SMILES).add_graphs()
+    small_code = small.graph_table["atom_type"][small.graph_table["nptr"][0]].item()
+    assert small_code in big.graph_table["atom_type"].tolist()
+
+
 def test_row_alignment_survives_encoding():
     """Encoding a row alone and in a batch must give the same atoms."""
     from metabo_depthcharge.encoders import GraphMolEncoder
 
     ds = _graph_ds()
-    enc = GraphMolEncoder(ds.atom_types(), [16, 32], 0.0, 32, per_atom=True).eval()
+    enc = GraphMolEncoder([16, 32], 0.0, 32, per_atom=True).eval()
     with torch.no_grad():
         batched, _ = enc(ds.gather_graphs(torch.arange(len(GRAPH_SMILES))))
         for i in range(len(GRAPH_SMILES)):
@@ -495,7 +505,7 @@ def test_dataloader_path_matches_the_gather_path():
     from metabo_depthcharge.encoders import GraphMolEncoder
 
     ds = _graph_ds()
-    enc = GraphMolEncoder(ds.atom_types(), [16, 32], 0.0, 32, per_atom=True).eval()
+    enc = GraphMolEncoder([16, 32], 0.0, 32, per_atom=True).eval()
     loader = DataLoader(ds, batch_size=len(ds), collate_fn=MoleculeDataset.collate)
     with torch.no_grad():
         from_loader, mask_loader = enc(next(iter(loader))["graph"])
@@ -504,15 +514,16 @@ def test_dataloader_path_matches_the_gather_path():
     assert torch.equal(mask_loader, mask_gather)
 
 
-def test_encoder_rejects_an_atom_type_outside_its_table():
-    """Graphs keyed against a different table would silently embed wrong molecules."""
+def test_encoder_handles_a_dataset_it_was_never_built_from():
+    """The whole point: one encoder, no table tying it to any particular dataset --
+    a pool it has never seen (here: with atom kinds `narrow`'s never had) just works."""
     from metabo_depthcharge.encoders import GraphMolEncoder
 
     narrow = MoleculeDataset.from_list(["CCO"]).add_graphs()
-    enc = GraphMolEncoder(narrow.atom_types(), [16, 32], 0.0, 32)
+    enc = GraphMolEncoder([16, 32], 0.0, 32)
     wide = _graph_ds()
-    with pytest.raises(ValueError, match="outside this encoder"):
-        enc(wide.gather_graphs(torch.arange(len(wide))))
+    enc(narrow.gather_graphs(torch.arange(len(narrow))))  # must not raise
+    enc(wide.gather_graphs(torch.arange(len(wide))))  # nor this, despite new atom kinds
 
 
 def test_graph_columns_are_stored_and_readable_by_column():
@@ -526,7 +537,7 @@ def test_graph_columns_are_stored_and_readable_by_column():
 def test_add_representations_after_add_graphs_keeps_both():
     """map() must not drop the columns that row formatting hides."""
     ds = _graph_ds().add_representations({"morgan": None})
-    assert "graph_atom_key" in ds.ds.column_names
+    assert "graph_atom_code" in ds.ds.column_names
     assert "morgan" in ds.ds.column_names
     assert ds.graph_table["smiles"] == GRAPH_SMILES
 
