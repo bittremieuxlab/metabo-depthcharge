@@ -8,6 +8,7 @@ from os import PathLike
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import torch
 from datasets import Dataset, Features, Sequence, Value
 from tqdm.auto import tqdm
@@ -108,6 +109,8 @@ def _column(ds: Dataset, name: str) -> np.ndarray:
     """
     col = ds.data.column(name)
     if ds._indices is not None:
+        if pa.types.is_string(col.type):
+            col = col.cast(pa.large_string())
         col = col.take(ds._indices.column(0))
     return col.to_numpy(zero_copy_only=False)
 
