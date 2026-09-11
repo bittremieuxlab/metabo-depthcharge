@@ -1,7 +1,11 @@
 # Adapted from MIST-CF (Goldman et al., 2023)
 # Licensed under MIT License - see LICENSE in this directory
 """create_subformulae_assignment.py
-Given spectra and candidates from a labels file, assign subformulae and save to JSON files.
+Given spectra and candidates from a labels file, assign subformulae and save them into a packed
+subformula container (one `part-<start>-<end>.subforms` SQLite+zstd shard per invocation, via
+common.subform_store.write_store) rather than one loose JSON file per spectrum. A directory of
+several such shards (e.g. from a chunked/array run over disjoint --start-idx/--end-idx slices)
+is read back as one merged store by common.subform_store.open_subforms.
 """
 
 import argparse
@@ -15,6 +19,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from .. import common
+from ..common.subform_store import write_store
 
 
 def get_args():
@@ -170,8 +175,7 @@ def main():
             spec_to_assigns[spec_name] = export_dicts[:2]
 
     parallel_list = [
-        {"spec_name": k, "export_dicts": v, "output_dir": output_dir}
-        for k, v in spec_to_assigns.items()
+        {"spec_name": k, "export_dicts": v} for k, v in spec_to_assigns.items()
     ]
 
     start_idx = args.start_idx if args.start_idx is not None else 0
@@ -179,20 +183,20 @@ def main():
     parallel_list = parallel_list[start_idx:end_idx]
 
     def export_wrapper(x):
-        return common.assign_single_spec(**x)
+        return common.pack_single_spec(**x)
 
     print(
         f"Processing {len(parallel_list)} different spectra (slice [{start_idx}:{end_idx}])"
     )
 
     if num_workers == 0 or debug:
-        [export_wrapper(i) for i in tqdm(parallel_list)]
+        pairs = [export_wrapper(i) for i in tqdm(parallel_list)]
     else:
         from pathos import multiprocessing as mp
 
         cpus = min(mp.cpu_count(), num_workers)
         pool = mp.Pool(processes=cpus)
-        list(
+        pairs = list(
             tqdm(
                 pool.imap_unordered(export_wrapper, parallel_list),
                 total=len(parallel_list),
@@ -201,6 +205,16 @@ def main():
         )
         pool.close()
         pool.join()
+
+    # One shard file per invocation (named by its own index slice), written by
+    # metabo_depthcharge.mist_cf.common.subform_store.write_store instead of one
+    # loose JSON per spectrum. A chunked/array run over disjoint slices of
+    # output_dir therefore never has two processes writing the same file --
+    # each shard is self-contained, and open_subforms() reads a directory of
+    # shards as one merged store.
+    shard_path = output_dir / f"part-{start_idx:07d}-{end_idx:07d}.subforms"
+    n = write_store(shard_path, pairs)
+    print(f"Wrote {n} spectra -> {shard_path}")
 
 
 if __name__ == "__main__":

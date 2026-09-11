@@ -8,6 +8,7 @@ from functools import reduce
 
 import numpy as np
 import torch
+import zstandard as zstd
 from rdkit import Chem
 from rdkit.Chem import Atom
 from rdkit.Chem.Descriptors import ExactMolWt
@@ -569,7 +570,7 @@ def get_output_dict(spec_name, spec, form, mass_diff_type, mass_diff_thresh, ion
     return output_dict
 
 
-def assign_single_spec(spec_name, export_dicts, output_dir):
+def _build_subform_dict(export_dicts):
     # Nested keying: {formula: {ion: {"cand_tbl": ...}}}
     # A single formula can legitimately pair with multiple ions (e.g. [M+H]+ and
     # [M+Na]+, or [M-H]- and [M+H]+ across modes). Flat keying by formula only
@@ -582,6 +583,11 @@ def assign_single_spec(spec_name, export_dicts, output_dir):
         res_dict.setdefault(form, {})[ion] = {
             "cand_tbl": output["output_tbl"],
         }
+    return res_dict
+
+
+def assign_single_spec(spec_name, export_dicts, output_dir):
+    res_dict = _build_subform_dict(export_dicts)
 
     if output_dir is not None:
         from pathlib import Path
@@ -589,6 +595,23 @@ def assign_single_spec(spec_name, export_dicts, output_dir):
         with open(Path(output_dir) / f"{spec_name}.json", "w") as f:
             json.dump(res_dict, f, separators=(",", ":"))
     return res_dict
+
+
+def pack_single_spec(spec_name, export_dicts):
+    """Like assign_single_spec, but returns (name, compressed_blob) instead of
+    writing a loose JSON file per spectrum.
+
+    Run this inside a worker pool and feed the returned pairs to
+    metabo_depthcharge.mist_cf.common.subform_store.write_store to build one
+    packed subformula container -- this is what
+    mist_cf.preprocessing.04_create_subformulae_assignment writes by default,
+    instead of one JSON file per spectrum.
+    """
+    res_dict = _build_subform_dict(export_dicts)
+    blob = zstd.ZstdCompressor().compress(
+        json.dumps(res_dict, separators=(",", ":")).encode()
+    )
+    return spec_name, blob
 
 
 def clipped_ppm(mass_diff, parentmass):

@@ -113,11 +113,71 @@ class LooseDirStore:
         pass
 
 
+class ShardedSubformStore:
+    """Random access across several SubformStore shards in one directory.
+
+    Chunked/array-job producers (e.g. mist_cf.preprocessing.04_create_subformulae_assignment
+    run over disjoint --start-idx/--end-idx slices) each own one shard file, so parallel
+    writers never contend for the same SQLite file. This presents all shards as one store.
+    """
+
+    def __init__(self, shard_paths):
+        self.shard_paths = sorted(shard_paths)
+        self.path = self.shard_paths[0].parent
+        self._pid = None
+        self._stores = None
+        self._index = None
+
+    def _bind(self):
+        if self._stores is not None and self._pid == os.getpid():
+            return
+        self._stores = [SubformStore(p) for p in self.shard_paths]
+        self._index = {}
+        for store in self._stores:
+            for name in store.keys():
+                self._index[name] = store
+        self._pid = os.getpid()
+
+    def __getitem__(self, name):
+        self._bind()
+        store = self._index.get(str(name))
+        if store is None:
+            raise KeyError(name)
+        return store[name]
+
+    def get(self, name, default=None):
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
+    def __contains__(self, name):
+        self._bind()
+        return str(name) in self._index
+
+    def __len__(self):
+        self._bind()
+        return len(self._index)
+
+    def keys(self):
+        self._bind()
+        return iter(self._index.keys())
+
+    def close(self):
+        if self._stores is not None:
+            for s in self._stores:
+                s.close()
+        self._stores = None
+        self._index = None
+
+
 def open_subforms(path):
     """Open `path` as a container if it is one, else as a legacy directory.
 
     Also accepts a directory path whose sibling container exists, so callers can be pointed at
-    either and keep working: `.../subformulae` finds `.../subformulae.subforms`.
+    either and keep working: `.../subformulae` finds `.../subformulae.subforms`. A directory
+    holding multiple `*.subforms` shard files (chunked/array-job output) opens as one merged
+    ShardedSubformStore; a directory of legacy loose JSONs falls back to LooseDirStore.
     """
     p = Path(path)
     if p.is_file():
@@ -127,6 +187,9 @@ def open_subforms(path):
         if cand.is_file():
             return SubformStore(cand)
     if p.is_dir():
+        shards = [q for suf in _SUFFIXES for q in p.glob(f"*{suf}")]
+        if shards:
+            return ShardedSubformStore(shards)
         return LooseDirStore(p)
     raise FileNotFoundError(f"no subformula store or directory at {path}")
 
