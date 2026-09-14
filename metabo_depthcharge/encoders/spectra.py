@@ -169,6 +169,12 @@ class PeakEncoder(nn.Module):
     use_mz : bool, default True
         Include the m/z encoding in the summed output. ``False`` means only intensity
         is encoded.
+    use_intensity : bool, default True
+        Include the sinusoidal intensity encoding in the summed output. ``False``
+        means intensity contributes nothing here -- use this when intensity is
+        instead folded into a :class:`SubformulaEncoder` with
+        ``include_intensity=True`` (see :class:`SpectrumEncoder`'s
+        ``use_intensity`` flag).
 
     References
     ----------
@@ -183,10 +189,12 @@ class PeakEncoder(nn.Module):
         min_mz_wavelength: float,
         max_mz_wavelength: float,
         use_mz: bool = True,
+        use_intensity: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
         self.use_mz = use_mz
+        self.use_intensity = use_intensity
 
         self.mz_encoder = FloatEncoder(
             d_model=self.d_model,
@@ -218,7 +226,7 @@ class PeakEncoder(nn.Module):
         torch.Tensor
             ``(B, L, d_model)`` float tensor.
         """
-        out = self.int_encoder(x[:, :, 1])
+        out = self.int_encoder(x[:, :, 1]) if self.use_intensity else 0
         if self.use_mz:
             out = out + self.mz_encoder(x[:, :, 0])
         return out
@@ -264,6 +272,13 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
         Whether to include sinusoidal m/z in the peak embeddings and precursor token.
         Set ``False`` to build peak tokens from intensity and formulae alone, so that
         m/z never enters as a number. Requires a ``subformula_encoder``.
+    intensity_encoding : {"sinusoidal", "joint_formula"}, default "sinusoidal"
+        How intensity enters the peak embeddings. ``"sinusoidal"`` (default)
+        encodes it with :class:`PeakEncoder`, summed separately from the
+        ``subformula_encoder``'s formula embedding. ``"joint_formula"`` instead
+        folds raw intensity into the ``subformula_encoder``'s own projection,
+        so one joint layer sees ``[formula_counts, intensity]`` together.
+        Requires a ``subformula_encoder`` constructed with ``include_intensity=True``.
     use_global_token : bool, default True
         If ``True``, prepends a CLS token to the peak sequence. It carries:
 
@@ -295,9 +310,12 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
         metadata_encoder: nn.Module | None = None,
         causal: bool = False,
         use_mz: bool = True,
+        intensity_encoding: str = "sinusoidal",
         use_global_token: bool = True,
         norm_first: bool = False,
     ):
+        if intensity_encoding not in ("sinusoidal", "joint_formula"):
+            raise ValueError(f"Unknown intensity_encoding: {intensity_encoding}")
         super().__init__(
             d_model=d_model,
             nhead=nhead,
@@ -309,6 +327,7 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
                 min_mz_wavelength=min_mz_wavelength,
                 max_mz_wavelength=max_mz_wavelength,
                 use_mz=use_mz,
+                use_intensity=(intensity_encoding == "sinusoidal"),
             ),
         )
 
@@ -348,7 +367,15 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
                 "use_mz=False with no subformula_encoder leaves peaks with no "
                 "m/z embedding path at all"
             )
+        if intensity_encoding == "joint_formula" and not (
+            subformula_encoder is not None and subformula_encoder.include_intensity
+        ):
+            raise ValueError(
+                "intensity_encoding='joint_formula' requires a subformula_encoder "
+                "constructed with include_intensity=True"
+            )
         self.use_mz = use_mz
+        self.intensity_encoding = intensity_encoding
         self.use_global_token = use_global_token
         self.metadata_encoder = metadata_encoder
 
@@ -397,9 +424,15 @@ class SpectrumEncoder(SpectrumTransformerEncoder):
 
         peaks = self.peak_encoder(spectra)
         if self.subformula_encoder is not None and subformulae is not None:
+            extra = (
+                {"intensity": intensity}
+                if self.subformula_encoder.include_intensity
+                else {}
+            )
             peaks = peaks + self.subformula_encoder(
                 subformulae["form_vec"],
                 subformulae["parent_form_vec"],
+                **extra,
             )
 
         if self.use_global_token:
@@ -569,6 +602,13 @@ class SubformulaEncoder(nn.Module):
         equal ``d_model``.
     mlp_dropout : float, default 0.2
         Dropout between the ``mlp_dims`` layers. Unused without ``mlp_dims``.
+    include_intensity : bool, default False
+        If ``True``, ``forward`` takes an additional ``intensity`` tensor and
+        concatenates it (one extra raw scalar column) onto the formula
+        embedding before the projection/MLP head, so a single joint layer sees
+        formula and intensity together. Pair with :class:`SpectrumEncoder`'s
+        ``use_intensity=False`` so intensity isn't also separately sinusoidally
+        encoded and summed in.
     """
 
     def __init__(
@@ -579,14 +619,17 @@ class SubformulaEncoder(nn.Module):
         float_norm: str | Sequence[float] = "flare",
         mlp_dims: tuple[int, ...] | None = None,
         mlp_dropout: float = 0.2,
+        include_intensity: bool = False,
     ):
         super().__init__()
         self.form_embedder = form_embedder
         self.use_complement = use_complement
+        self.include_intensity = include_intensity
         norm = _resolve_float_norm(float_norm) if form_embedder == "float" else None
         self.form_encoder = get_embedder(form_embedder, norm=norm)
 
         in_dim = self.form_encoder.full_dim * (2 if use_complement else 1)
+        in_dim += 1 if include_intensity else 0
         if mlp_dims is None:
             self.proj = nn.Linear(in_dim, d_model)
             self.layers = None
@@ -606,6 +649,7 @@ class SubformulaEncoder(nn.Module):
         self,
         form_vec: torch.Tensor,
         parent_form_vec: torch.Tensor | None,
+        intensity: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Encode per-peak subformulae relative to their parent formula.
 
@@ -619,6 +663,9 @@ class SubformulaEncoder(nn.Module):
             ``(B, ELEMENT_DIM)`` int tensor — parent molecular formula.
             See :func:`~metabo_depthcharge.spec.subformulae.formula_to_dense` for how to obtain this
             from a formula string. Unused when ``use_complement=False``.
+        intensity : torch.Tensor, optional
+            ``(B, L)`` float tensor of raw peak intensities. Required when
+            ``include_intensity=True``, ignored otherwise.
 
         Returns
         -------
@@ -632,6 +679,11 @@ class SubformulaEncoder(nn.Module):
             x = torch.cat([form_emb, diff_emb], dim=-1)
         else:
             x = form_emb
+
+        if self.include_intensity:
+            if intensity is None:
+                raise ValueError("include_intensity=True requires an intensity tensor")
+            x = torch.cat([x, intensity[..., None].to(x.dtype)], dim=-1)
 
         if self.proj is not None:
             return self.proj(x)
