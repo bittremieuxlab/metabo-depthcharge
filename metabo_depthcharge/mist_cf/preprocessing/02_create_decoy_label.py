@@ -181,9 +181,12 @@ def filter_spec_entries(
     spec,
     ion_masses,
     *,
-    mass_to_formulas,
-    formula_to_score,
-    spec2form,
+    masses_arr,
+    offsets_arr,
+    formula_idx_arr,
+    unique_forms,
+    scores_arr,
+    spec2form_idx,
     spec2parentmass,
     max_decoy,
     max_pred_candidates,
@@ -194,34 +197,39 @@ def filter_spec_entries(
     device=None,
 ):
     # Pair each formula only with the ion that actually produced its mass
-    # for THIS spec — no cross-spec ion leakage.
+    # for THIS spec — no cross-spec ion leakage. Formulas are referenced by
+    # their integer position in the global `unique_forms` table (found via
+    # binary search into the CSR-encoded SIRIUS output: masses_arr/offsets_arr
+    # index into formula_idx_arr) rather than by string, so building this set
+    # never touches the shared formula-string objects.
     dict_entry = set()
     for ion, mass in ion_masses:
-        forms = mass_to_formulas.get(mass, [])
-        dict_entry.update((ion, f) for f in forms)
+        pos = np.searchsorted(masses_arr, mass)
+        if pos < len(masses_arr) and masses_arr[pos] == mass:
+            idxs = formula_idx_arr[offsets_arr[pos] : offsets_arr[pos + 1]]
+            dict_entry.update((ion, int(i)) for i in idxs)
     if len(dict_entry) > 0:
-        ions_all, cands_all = zip(*dict_entry, strict=False)
+        ions_all, idx_all = zip(*dict_entry, strict=False)
         ions_all = np.array(ions_all)
-        cands_all = np.array(cands_all)
+        idx_all = np.array(idx_all, dtype=np.int64)
     else:
         ions_all = np.array([], dtype=object)
-        cands_all = np.array([], dtype=object)
+        idx_all = np.array([], dtype=np.int64)
 
     # Reuse the globally-precomputed per-formula scores (the fast filter is a
     # pure function of cand_form, not spec/ion) instead of re-running the NN.
     scores_all = None
-    if formula_to_score is not None and len(cands_all) > 0:
-        scores_all = np.array(
-            [formula_to_score[f] for f in cands_all], dtype=np.float32
-        )
+    if scores_arr is not None and len(idx_all) > 0:
+        scores_all = scores_arr[idx_all]
 
     # --- Training decoy path (true form excluded before sampling). ---
-    inds = cands_all != spec2form[spec]
-    cands = cands_all[inds]
+    true_idx = spec2form_idx[spec]
+    inds = idx_all != true_idx
+    cand_idx = idx_all[inds]
     ions = ions_all[inds]
     was_found = np.sum(~inds) > 0
 
-    if len(cands) < max_decoy:
+    if len(cand_idx) < max_decoy:
         pass
     else:
         # Per-spec deterministic RNG -> order-independent under parallelism.
@@ -230,7 +238,7 @@ def filter_spec_entries(
         np.random.seed(_spec_seed(spec, seed, salt=0x5EED))
         cand_inds = sample_decoys(
             spec,
-            cands,
+            unique_forms[cand_idx],
             ions,
             spec2parentmass[spec],
             max_decoy,
@@ -241,19 +249,19 @@ def filter_spec_entries(
             precomputed_scores=(scores_all[inds] if scores_all is not None else None),
         )
         ions = ions[cand_inds]
-        cands = cands[cand_inds]
+        cand_idx = cand_idx[cand_inds]
 
     # --- Honest pred-candidate path (true form NOT excluded). ---
     # Sample on the full SIRIUS union; true survives only if the real deployment
     # pipeline would have kept it.
-    if len(cands_all) <= max_pred_candidates:
+    if len(idx_all) <= max_pred_candidates:
         pred_ions = ions_all
-        pred_cands = cands_all
+        pred_idx = idx_all
     else:
         np.random.seed(_spec_seed(spec, seed, salt=0))
         pred_inds = sample_decoys(
             spec,
-            cands_all,
+            unique_forms[idx_all],
             ions_all,
             spec2parentmass[spec],
             max_pred_candidates,
@@ -264,21 +272,28 @@ def filter_spec_entries(
             precomputed_scores=scores_all,
         )
         pred_ions = ions_all[pred_inds]
-        pred_cands = cands_all[pred_inds]
+        pred_idx = idx_all[pred_inds]
 
     return {
         "spec": spec,
         "was_found": was_found,
         "out_ions": ions,
-        "out_cands": cands,
+        "out_cands": unique_forms[cand_idx],
         "pred_ions": pred_ions,
-        "pred_cands": pred_cands,
+        "pred_cands": unique_forms[pred_idx],
     }
 
 
 # Read-only context shared with worker processes via copy-on-write fork
 # inheritance (Linux). Populated in main() BEFORE the pool is created so the
-# large tables (mass_to_formulas, formula_to_score) are never pickled to workers.
+# large tables (masses_arr/offsets_arr/formula_idx_arr/unique_forms/scores_arr)
+# are never pickled to workers. These MUST stay plain numpy arrays (not dicts
+# or object-dtype arrays of Python strings): CPython bumps an object's refcount
+# on every access, which dirties its page and defeats fork's copy-on-write
+# sharing, so a dict of hundreds of millions of str/list objects gets
+# effectively duplicated per worker. A numpy array with a real fixed-width
+# dtype is one buffer with one refcounted object, so touching its elements
+# never triggers COW duplication no matter how many workers read it.
 _WORKER_CTX = {}
 
 
@@ -419,12 +434,11 @@ def main():
     spec_to_form_list = {}
     spec_to_ion_list = {}
     spec_to_found = defaultdict(lambda: False)
-    # mass_to_formulas is safe to share across specs/ions: SIRIUS decomp output
-    # for a given neutral mass depends only on the mass, not on the (spec, ion)
-    # that produced it. But the (ion, formula) pairing MUST be kept per-spec:
-    # two different specs can yield the same rounded neutral mass under
-    # different ion hypotheses, and we must not cross-contaminate their ions.
-    mass_to_formulas = {}
+    # SIRIUS decomp output for a given neutral mass depends only on the mass,
+    # not on the (spec, ion) that produced it, so it is safe to share across
+    # specs/ions. But the (ion, formula) pairing MUST be kept per-spec: two
+    # different specs can yield the same rounded neutral mass under different
+    # ion hypotheses, and we must not cross-contaminate their ions.
     spec_to_ion_masses = defaultdict(list)  # spec -> [(ion, mass), ...]
 
     # Per-spec ion mode, derived from the (canonical) true-ion adduct sign.
@@ -478,31 +492,72 @@ def main():
     if elements is not None:
         sirius_kwargs["el_str"] = elements
     out_dict = decomp.run_sirius(all_masses, **sirius_kwargs)
-    mass_to_formulas.update(out_dict)
-    del out_dict
+
+    # Encode the SIRIUS output (hundreds of millions of formula strings, in the
+    # OOM this fixes: 207M) as flat numpy arrays instead of a {mass: [str,
+    # ...]} dict of Python objects. Building it as a dict here already ran
+    # fine — the OOM happened one step later, when that dict got forked to 24
+    # worker processes: every access bumps a Python object's refcount, which
+    # dirties its page and defeats copy-on-write, so the whole dict of
+    # hundreds of millions of str/list objects was effectively duplicated per
+    # worker (>800GB). Numpy arrays with a real fixed-width dtype (not
+    # dtype=object, which is just boxed Python objects again) are each a
+    # single buffer/object, so forking them to any number of workers costs
+    # one copy, not N. Layout is CSR: masses_arr (sorted unique masses) +
+    # offsets_arr index into formula_idx_arr, whose entries are positions into
+    # the sorted `unique_forms` string table.
+    print("Encoding SIRIUS decomp output into flat numpy arrays...")
+    sorted_masses = sorted(out_dict.keys())
+    masses_arr = np.array(sorted_masses, dtype=np.float64)
+    lengths = np.fromiter(
+        (len(out_dict[m]) for m in sorted_masses), dtype=np.int64, count=len(sorted_masses)
+    )
+    offsets_arr = np.zeros(len(sorted_masses) + 1, dtype=np.int64)
+    np.cumsum(lengths, out=offsets_arr[1:])
+    if sorted_masses:
+        flat_forms = np.concatenate([np.array(out_dict[m]) for m in sorted_masses])
+    else:
+        flat_forms = np.array([], dtype="<U1")
+    out_dict.clear()
+    del out_dict, sorted_masses, lengths
+
+    unique_forms = np.unique(flat_forms)
+    formula_idx_arr = np.searchsorted(unique_forms, flat_forms).astype(np.int32)
+    del flat_forms
+    print(f"{len(unique_forms)} unique candidate formulae across all masses.")
+
+    # Map each spec's true formula onto its position in unique_forms (-1 if
+    # SIRIUS decomp never produced it for that spec's mass/ion hypothesis).
+    true_form_arr = np.array(true_formulae)
+    if len(unique_forms):
+        true_pos = np.searchsorted(unique_forms, true_form_arr)
+        true_pos = np.clip(true_pos, 0, len(unique_forms) - 1)
+        found_mask = unique_forms[true_pos] == true_form_arr
+    else:
+        true_pos = np.zeros(len(true_form_arr), dtype=np.int64)
+        found_mask = np.zeros(len(true_form_arr), dtype=bool)
+    true_pos[~found_mask] = -1
+    spec2form_idx = dict(zip(specs, true_pos.tolist(), strict=False))
 
     # The fast filter score is a pure function of the candidate FORMULA: the
     # model never sees the spectrum or the adduct (FastFFN.forward consumes only
     # the formula's element-count embedding). The original code re-embedded and
     # re-scored the same formulae once per spectrum, so a formula shared by N
     # specs/ions was scored N times — the dominant cost for large inputs, none
-    # of which the GPU helps with. Instead, score every unique formula ONCE here
-    # and reuse the scores via a {formula: score} lookup in filter_spec_entries.
-    # Output is byte-identical: the per-spec path consumes the exact same
-    # per-formula scores (the MLP has no batch-coupled layers, so a formula's
-    # score is independent of how candidates are batched), then argsorts them
-    # in the unchanged candidate order.
-    formula_to_score = None
+    # of which the GPU helps with. Instead, score every unique formula ONCE
+    # here into an array aligned with unique_forms, reused via integer
+    # indexing in filter_spec_entries. Output is byte-identical: the per-spec
+    # path consumes the exact same per-formula scores (the MLP has no
+    # batch-coupled layers, so a formula's score is independent of how
+    # candidates are batched), then argsorts them in the unchanged candidate
+    # order.
+    scores_arr = None
     if sample_strat == "fast_filter" and fast_model_obj is not None:
-        unique_forms = np.array(
-            sorted({f for forms in mass_to_formulas.values() for f in forms}),
-            dtype=object,
-        )
         print(
             f"Fast-filter: scoring {len(unique_forms)} unique candidate formulae "
             f"once (reused across all spectra)..."
         )
-        formula_to_score = {}
+        scores_arr = np.empty(len(unique_forms), dtype=np.float32)
         # Chunk so the transient embedding list + DataFrame inside
         # fast_filter_score stays bounded for very large formula universes.
         # GPU memory is bounded by the DataLoader batch_size (batches are
@@ -515,17 +570,20 @@ def main():
             chunk_scores = fast_model_obj.fast_filter_score(
                 "global", chunk, chunk, device, batch_size=1024
             )
-            formula_to_score.update(zip(chunk, chunk_scores, strict=False))
+            scores_arr[start : start + len(chunk)] = chunk_scores
 
     # Build the per-spectrum candidate sets. This phase is pure-Python (set
     # building + per-candidate score lookups) and was the remaining single-core
     # bottleneck after the fast filter was vectorized, so fan it out across
-    # processes. On Linux, fork lets workers read the large mass_to_formulas /
-    # formula_to_score tables via copy-on-write without pickling them.
+    # processes. On Linux, fork lets workers read the large numpy tables via
+    # copy-on-write without pickling them.
     ctx_kwargs = dict(
-        mass_to_formulas=mass_to_formulas,
-        formula_to_score=formula_to_score,
-        spec2form=spec2form,
+        masses_arr=masses_arr,
+        offsets_arr=offsets_arr,
+        formula_idx_arr=formula_idx_arr,
+        unique_forms=unique_forms,
+        scores_arr=scores_arr,
+        spec2form_idx=spec2form_idx,
         spec2parentmass=spec2parentmass,
         max_decoy=max_decoy,
         max_pred_candidates=max_pred_candidates,
