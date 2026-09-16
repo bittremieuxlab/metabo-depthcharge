@@ -49,7 +49,7 @@ def get_args():
         type=str,
         default=None,
         help="SIRIUS element alphabet string (e.g. 'C[0-]N[0-]O[0-]H[0-]S[0-4]'). "
-        "Defaults to decomp.sirius_decomp.EL_STR_DEFAULT if omitted.",
+        "Defaults to decomp.EL_STR_DEFAULT if omitted.",
     )
     parser.add_argument(
         "--max-pred-candidates",
@@ -491,35 +491,44 @@ def main():
     }
     if elements is not None:
         sirius_kwargs["el_str"] = elements
-    out_dict = decomp.run_sirius(all_masses, **sirius_kwargs)
 
-    # Encode the SIRIUS output (hundreds of millions of formula strings, in the
-    # OOM this fixes: 207M) as flat numpy arrays instead of a {mass: [str,
-    # ...]} dict of Python objects. Building it as a dict here already ran
-    # fine — the OOM happened one step later, when that dict got forked to 24
-    # worker processes: every access bumps a Python object's refcount, which
-    # dirties its page and defeats copy-on-write, so the whole dict of
-    # hundreds of millions of str/list objects was effectively duplicated per
-    # worker (>800GB). Numpy arrays with a real fixed-width dtype (not
-    # dtype=object, which is just boxed Python objects again) are each a
-    # single buffer/object, so forking them to any number of workers costs
-    # one copy, not N. Layout is CSR: masses_arr (sorted unique masses) +
-    # offsets_arr index into formula_idx_arr, whose entries are positions into
-    # the sorted `unique_forms` string table.
+    # Stream one SIRIUS batch at a time (decomp.iter_sirius_batches) instead of
+    # run_sirius, which merges every batch into one Python dict before
+    # returning anything. That dict holds every mass's full candidate-formula
+    # list as native Python str/list objects simultaneously — see
+    # decomp.run_sirius's docstring: it already OOM'd once at ~200k masses
+    # with a permissive element alphabet, and this call is 912k+ masses with
+    # the same alphabet, well past that. Converting each batch straight to a
+    # numpy string array as it arrives (fixed-width dtype, no per-element
+    # object overhead) instead of leaving it as a Python dict/list bounds peak
+    # memory to one batch's decompositions rather than the whole run.
     print("Encoding SIRIUS decomp output into flat numpy arrays...")
-    sorted_masses = sorted(out_dict.keys())
-    masses_arr = np.array(sorted_masses, dtype=np.float64)
+    mass_chunks = []
+    forms_chunks = []
+    for _, batch_masses, batch_dict in decomp.iter_sirius_batches(
+        all_masses, **sirius_kwargs
+    ):
+        for m in batch_masses:
+            cands = batch_dict.get(m, [])
+            if cands:
+                mass_chunks.append(m)
+                forms_chunks.append(np.array(cands))
+
+    # Layout is CSR: masses_arr (sorted unique masses) + offsets_arr index
+    # into formula_idx_arr, whose entries are positions into the sorted
+    # `unique_forms` string table.
+    sort_order = np.argsort(mass_chunks) if mass_chunks else np.array([], dtype=np.int64)
+    masses_arr = np.array(mass_chunks, dtype=np.float64)[sort_order]
     lengths = np.fromiter(
-        (len(out_dict[m]) for m in sorted_masses), dtype=np.int64, count=len(sorted_masses)
+        (len(forms_chunks[i]) for i in sort_order), dtype=np.int64, count=len(sort_order)
     )
-    offsets_arr = np.zeros(len(sorted_masses) + 1, dtype=np.int64)
+    offsets_arr = np.zeros(len(masses_arr) + 1, dtype=np.int64)
     np.cumsum(lengths, out=offsets_arr[1:])
-    if sorted_masses:
-        flat_forms = np.concatenate([np.array(out_dict[m]) for m in sorted_masses])
+    if len(forms_chunks):
+        flat_forms = np.concatenate([forms_chunks[i] for i in sort_order])
     else:
         flat_forms = np.array([], dtype="<U1")
-    out_dict.clear()
-    del out_dict, sorted_masses, lengths
+    del mass_chunks, forms_chunks, lengths, sort_order
 
     unique_forms = np.unique(flat_forms)
     formula_idx_arr = np.searchsorted(unique_forms, flat_forms).astype(np.int32)

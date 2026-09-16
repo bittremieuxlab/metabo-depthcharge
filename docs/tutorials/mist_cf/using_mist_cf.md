@@ -18,9 +18,10 @@ usage: predict_mgf.py [-h] --mgf-file MGF_FILE --save-dir SAVE_DIR --checkpoint-
 
 predict_mgf.py - Predict molecular formulae for a raw MGF, no ground truth needed.
 
-Pipeline: SIRIUS mass decomposition (per spectrum's precursor m/z + resolved
-ion mode) -> subformula assignment -> mist_cf_score model -> ranked
-(cand_form, cand_ion) per spectrum.
+Pipeline: mass decomposition (per spectrum's precursor m/z + resolved
+ion mode, via the pure-Python `mass_decomp` engine by default -- no SIRIUS
+install needed, see {doc}`index`) -> subformula assignment -> mist_cf_score
+model -> ranked (cand_form, cand_ion) per spectrum.
 
 Ion mode (positive/negative) is required to pick which adducts to decompose
 against, and is resolved per spectrum in one of two ways:
@@ -35,7 +36,7 @@ adduct; the model still predicts which specific adduct within that mode.
 Spectra for which neither resolves are skipped (not aborted).
 
 --benchmark reports the true (formula, adduct) retainment/accuracy at each
-pipeline stage -- SIRIUS decomp, the fast-filter cap (if used), and the
+pipeline stage -- mass decomp, the fast-filter cap (if used), and the
 mist_cf model at top-1/5/10 -- using ground truth read from
 --benchmark-formula-field/--benchmark-adduct-field. The mist_cf model's
 top-1/5/10 accuracy is also broken down per ground-truth adduct. The

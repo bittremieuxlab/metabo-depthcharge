@@ -43,7 +43,7 @@ def get_args():
         "--elements",
         type=str,
         default=None,
-        help="SIRIUS element alphabet. Defaults to decomp.sirius_decomp.EL_STR_DEFAULT.",
+        help="Element alphabet. Defaults to decomp.EL_STR_DEFAULT.",
     )
     p.add_argument("--cores", type=int, default=16, help="Parallel SIRIUS workers")
     p.add_argument("--max-batch", type=int, default=50)

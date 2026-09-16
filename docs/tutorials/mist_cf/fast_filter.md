@@ -93,8 +93,7 @@ python -m metabo_depthcharge.mist_cf.preprocessing.biomols.02_create_formulae_de
 ```
 
 ```{note}
-Step 2 runs SIRIUS mass decomposition and is the most expensive step: hours to a day on many cores.
-It needs SIRIUS installed with `$SIRIUS_PATH` set and a valid login. See [here](https://github.com/samgoldman97/mist-cf#sirius--).
+Step 2 runs mass decomposition and is the most expensive step.
 ```
 
 ### 3. Split

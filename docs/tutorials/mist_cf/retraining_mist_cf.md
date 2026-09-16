@@ -11,9 +11,6 @@ This tutorial will outline how to re-train the our vendored `mist-cf` implementa
 
 - A `labels.tsv` with columns `spec, formula, ionization, instrument, dataset`,
   and the corresponding `.ms` spectrum files under `spec_files/`.
-- For decoy generation:
-  [SIRIUS](https://bio.informatik.uni-jena.de/software/sirius/) — set
-  `$SIRIUS_PATH` and log in (tested on SIRIUS v6.3.3).
 - The `fast_filter_best.ckpt` model from the
   [MIST-CF repo](https://github.com/samgoldman97/mist-cf).
 
@@ -77,7 +74,7 @@ This is a **retraining** pipeline, so a ground-truth molecular formula is
 **required for every spectrum**.
 ```
 
-## 2. Generate decoys (negative candidate formulae) with SIRIUS
+## 2. Generate decoys (negative candidate formulae) via mass decomposition
 
 ```bash
 python -m metabo_depthcharge.mist_cf.preprocessing.02_create_decoy_label \
