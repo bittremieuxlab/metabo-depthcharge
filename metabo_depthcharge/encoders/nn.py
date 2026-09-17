@@ -4,6 +4,54 @@ import torch
 import torch.nn as nn
 
 
+class GrowableEmbedding(nn.Embedding):
+    """An ``nn.Embedding`` that tolerates loading a checkpoint from a smaller vocab.
+
+    Drop-in replacement for :class:`torch.nn.Embedding` wherever ``num_embeddings``
+    is sized from an append-only vocabulary (e.g.
+    :data:`~metabo_depthcharge.spec.adducts.ADDUCT_VOCAB`,
+    :data:`~metabo_depthcharge.spec.metadata_parsers.INSTRUMENT_TYPES`).
+
+    Overrides the low-level ``_load_from_state_dict`` hook.
+    When the checkpoint's ``weight`` has fewer rows than this embedding's
+    current ``num_embeddings`` (and the same ``embedding_dim``), the checkpoint
+    rows are copied into the front of this module's own freshly-initialized
+    weight, leaving the newly appended rows at their normal (untrained) init.
+    """
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        key = prefix + "weight"
+        if key in state_dict:
+            ckpt_weight = state_dict[key]
+            current_n, dim = self.weight.shape
+            if (
+                ckpt_weight.dim() == 2
+                and ckpt_weight.shape[0] < current_n
+                and ckpt_weight.shape[1] == dim
+            ):
+                padded = self.weight.data.clone()
+                padded[: ckpt_weight.shape[0]] = ckpt_weight
+                state_dict = {**state_dict, key: padded}
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
+
 class AttnAggregator(nn.Module):
     """Attention-weighted sum over a sequence dimension.
 

@@ -7,7 +7,7 @@ from depthcharge.encoders import FloatEncoder
 from depthcharge.transformers import SpectrumTransformerEncoder
 from torch.nn import functional
 
-from metabo_depthcharge.encoders.nn import AttnAggregator
+from metabo_depthcharge.encoders.nn import AttnAggregator, GrowableEmbedding
 from metabo_depthcharge.mist_cf.common.chem_utils import VALID_ELEMENTS
 from metabo_depthcharge.mist_cf.nn_utils import get_embedder
 from metabo_depthcharge.spec.adducts import N_ADDUCTS
@@ -75,22 +75,24 @@ class MetadataEncoder(nn.Module):
         self.metadata_fields = metadata_fields
 
         if "adduct" in metadata_fields:
-            # Index 0 = unknown/other, padding_idx=0 so unknown → zero vector
-            self.adduct_emb = nn.Embedding(N_ADDUCTS, d_model, padding_idx=0)
+            # Index 0 = unknown/other, padding_idx=0 so unknown → zero vector.
+            self.adduct_emb = GrowableEmbedding(N_ADDUCTS, d_model, padding_idx=0)
 
         if "collision_energy" in metadata_fields:
             self.ce_encoder = nn.Linear(1, d_model)
 
         if "instrument_type" in metadata_fields:
-            self.instrument_emb = nn.Embedding(N_INSTRUMENTS, d_model, padding_idx=0)
+            self.instrument_emb = GrowableEmbedding(
+                N_INSTRUMENTS, d_model, padding_idx=0
+            )
 
         if "ion_activation" in metadata_fields:
-            self.ion_activation_emb = nn.Embedding(
+            self.ion_activation_emb = GrowableEmbedding(
                 N_ION_ACTIVATIONS, d_model, padding_idx=0
             )
 
         if "ionization_method" in metadata_fields:
-            self.ionization_method_emb = nn.Embedding(
+            self.ionization_method_emb = GrowableEmbedding(
                 N_IONIZATION_METHODS, d_model, padding_idx=0
             )
 
