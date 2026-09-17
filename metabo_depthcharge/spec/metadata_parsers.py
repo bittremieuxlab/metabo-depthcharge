@@ -23,15 +23,17 @@ from metabo_depthcharge.spec.adducts import encode_adduct
 #: * ``1`` — ``orbitrap``
 #: * ``2`` — ``qtof`` or `q-tof`
 #: * ``3`` — ``iontrap``
+#: * ``4`` — ``qqq`` (triple quadrupole; also matches ``qq``)
 INSTRUMENT_TYPES = [
     "orbitrap",
     "qtof",
     "iontrap",
+    "qqq",
 ]
 _INSTRUMENT_TO_IDX = {t: i + 1 for i, t in enumerate(INSTRUMENT_TYPES)}
 N_INSTRUMENTS = len(INSTRUMENT_TYPES) + 1  # +1 for unknown at index 0
 #: Alternate spellings for instrument strings that are automatically resolved.
-_INSTRUMENT_ALIASES = {"q-tof": "qtof"}
+_INSTRUMENT_ALIASES = {"q-tof": "qtof", "qq": "qqq"}
 
 
 def encode_instrument(instrument_str: str) -> int:

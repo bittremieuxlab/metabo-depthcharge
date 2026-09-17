@@ -38,6 +38,22 @@ _PROTON = 1.007276
 #: * ``13`` — ``[2M+HCOOH-H]-`` (alias ``[2M+FA-H]-``)
 #: * ``14`` — ``[2M+CH3COOH-H]-`` (alias ``[2M+Hac-H]-``)
 #: * ``15`` — ``[M+Br]-``
+#: * ``16`` — ``[M-H2O+H]+``
+#: * ``17`` — ``[M-2H2O+H]+``
+#: * ``18`` — ``[M+2H]2+``
+#: * ``19`` — ``[2M+Na-2H]-``
+#: * ``20`` — ``[M-H2O]+``
+#: * ``21`` — ``[M-CH3]-``
+#: * ``22`` — ``[M-2H]-``
+#: * ``23`` — ``[M]-``
+#: * ``24`` — ``[2M+NH4]+``
+#: * ``25`` — ``[M-H2O-H]-``
+#: * ``26`` — ``[M-H5O3]+``
+#: * ``27`` — ``[M+C2H4N]+`` (acetonitrile adduct, alias ``[M+ACN+H]+``)
+#: * ``28`` — ``[M+3H]3+``
+#: * ``29`` — ``[M+2Na-H]+``
+#: * ``30`` — ``[2M+K]+``
+#: * ``31`` — ``[M-H2]2-``
 ADDUCT_VOCAB = [
     "[M+H]+",
     "[M+Na]+",
@@ -54,6 +70,22 @@ ADDUCT_VOCAB = [
     "[2M+HCOOH-H]-",
     "[2M+CH3COOH-H]-",
     "[M+Br]-",
+    "[M-H2O+H]+",
+    "[M-2H2O+H]+",
+    "[M+2H]2+",
+    "[2M+Na-2H]-",
+    "[M-H2O]+",
+    "[M-CH3]-",
+    "[M-2H]-",
+    "[M]-",
+    "[2M+NH4]+",
+    "[M-H2O-H]-",
+    "[M-H5O3]+",
+    "[M+C2H4N]+",
+    "[M+3H]3+",
+    "[M+2Na-H]+",
+    "[2M+K]+",
+    "[M-H2]2-",
 ]
 
 #: Alternate spellings
@@ -62,6 +94,10 @@ _ADDUCT_ALIASES: dict[str, str] = {
     "[2M+FA-H]-": "[2M+HCOOH-H]-",
     "[M+Hac-H]-": "[M+CH3COOH-H]-",
     "[2M+Hac-H]-": "[2M+CH3COOH-H]-",
+    "[M+CH2O2-H]-": "[M+HCOOH-H]-",
+    "[2M+CH2O2-H]-": "[2M+HCOOH-H]-",
+    "[M+C2H4O2-H]-": "[M+CH3COOH-H]-",
+    "[2M+C2H4O2-H]-": "[2M+CH3COOH-H]-",
 }
 
 _ADDUCT_TO_IDX = {a: i + 1 for i, a in enumerate(ADDUCT_VOCAB)}
@@ -82,14 +118,29 @@ ADDUCT_MASS: dict[str, float] = {
     "[M+Cl]-": +34.969402,
     "[M+CH3COOH-H]-": +59.013851,
     "[M+HCOOH-H]-": +44.998201,
-    "[M]+": 0.0,
-    "[M]-": 0.0,
+    "[M]+": -0.000549,  # radical cation: electron loss, no atom change
+    "[M]-": +0.000549,  # radical anion: electron capture, no atom change
     "[2M+H]+": +_PROTON,
     "[2M-H]-": -_PROTON,
     "[2M+Na]+": +22.989218,
     "[2M+HCOOH-H]-": +44.998201,
     "[2M+CH3COOH-H]-": +59.013851,
     "[M+Br]-": +78.918886,  # 79Br (78.918338) + electron
+    "[M-H2O+H]+": -17.003289,  # -H2O (neutral) + H+
+    "[M-2H2O+H]+": -35.013854,  # -2 H2O (neutral) + H+
+    "[M+2H]2+": 2 * _PROTON,
+    "[2M+Na-2H]-": 20.974666,  # +Na (as in [M+Na]+) - 2 H+, net charge -1
+    "[M-H2O]+": -18.011114,  # -H2O (neutral), cation via electron loss
+    "[M-CH3]-": -15.022926,  # -CH3 (neutral methyl radical)
+    "[M-2H]-": -2.015101,  # -2 H (neutral), single net charge (field convention)
+    "[2M+NH4]+": +18.033823,  # same shift as [M+NH4]+; n=2 via _ADDUCT_NZ
+    "[M-H2O-H]-": -19.017841,  # -H2O (neutral) - H+
+    "[M-H5O3]+": -53.024419,  # -H5O3 (neutral fragment)
+    "[M+C2H4N]+": +42.033825,  # acetonitrile adduct, alias [M+ACN+H]+
+    "[M+3H]3+": 3 * _PROTON,
+    "[M+2Na-H]+": +44.971166,  # +2 Na (neutral) - H (neutral), cation
+    "[2M+K]+": +38.963158,  # same shift as [M+K]+; n=2 via _ADDUCT_NZ
+    "[M-H2]2-": -2.014553,  # -H2 (neutral), doubly charged anion
 }
 
 #: Per-adduct ``(n_mer, charge)``. Adducts absent here default to ``(1, 1)``.
@@ -99,6 +150,12 @@ _ADDUCT_NZ: dict[str, tuple[int, int]] = {
     "[2M+Na]+": (2, 1),
     "[2M+HCOOH-H]-": (2, 1),
     "[2M+CH3COOH-H]-": (2, 1),
+    "[2M+Na-2H]-": (2, 1),
+    "[2M+NH4]+": (2, 1),
+    "[2M+K]+": (2, 1),
+    "[M+2H]2+": (1, 2),
+    "[M+3H]3+": (1, 3),
+    "[M-H2]2-": (1, 2),
 }
 
 assert set(ADDUCT_VOCAB) <= set(ADDUCT_MASS), (
