@@ -7,21 +7,29 @@ The main entry-point to using our vendored `mist-cf` should be `python -m metabo
 python -m metabo_depthcharge.mist_cf.mist_cf_score.predict_mgf --help
 
 
-usage: predict_mgf.py [-h] --mgf-file MGF_FILE --save-dir SAVE_DIR --checkpoint-pth CHECKPOINT_PTH [--max-num MAX_NUM]
-                      [--id-key ID_KEY] [--precursor-mz-key PRECURSOR_MZ_KEY] [--adduct-key ADDUCT_KEY]
-                      [--ionmode-key IONMODE_KEY] [--instrument-key INSTRUMENT_KEY]
-                      [--instrument-override INSTRUMENT_OVERRIDE] [--default-instrument DEFAULT_INSTRUMENT]
-                      [--decomp-filter DECOMP_FILTER] [--decomp-ppm DECOMP_PPM] [--elements ELEMENTS] [--adducts ADDUCTS]
-                      [--fast-model FAST_MODEL] [--fast-num FAST_NUM] [--output-num OUTPUT_NUM] [--benchmark]
-                      [--benchmark-formula-field BENCHMARK_FORMULA_FIELD] [--benchmark-adduct-field BENCHMARK_ADDUCT_FIELD]
-                      [--batch-size BATCH_SIZE] [--num-workers NUM_WORKERS] [--gpu] [--debug]
+usage: predict_mgf.py [-h] --mgf-file MGF_FILE --save-dir SAVE_DIR
+                      --checkpoint-pth CHECKPOINT_PTH [--max-num MAX_NUM]
+                      [--id-key ID_KEY] [--precursor-mz-key PRECURSOR_MZ_KEY]
+                      [--adduct-key ADDUCT_KEY] [--ionmode-key IONMODE_KEY]
+                      [--instrument-key INSTRUMENT_KEY]
+                      [--instrument-override INSTRUMENT_OVERRIDE]
+                      [--default-instrument DEFAULT_INSTRUMENT]
+                      [--decomp-filter DECOMP_FILTER]
+                      [--decomp-ppm DECOMP_PPM] [--elements ELEMENTS]
+                      [--adducts ADDUCTS] [--known-adduct]
+                      [--fast-model FAST_MODEL] [--fast-num FAST_NUM]
+                      [--output-num OUTPUT_NUM] [--benchmark]
+                      [--benchmark-formula-field BENCHMARK_FORMULA_FIELD]
+                      [--benchmark-adduct-field BENCHMARK_ADDUCT_FIELD]
+                      [--batch-size BATCH_SIZE] [--num-workers NUM_WORKERS]
+                      [--gpu] [--debug]
 
 predict_mgf.py - Predict molecular formulae for a raw MGF, no ground truth needed.
 
-Pipeline: mass decomposition (per spectrum's precursor m/z + resolved
-ion mode, via the pure-Python `mass_decomp` engine by default -- no SIRIUS
-install needed, see {doc}`index`) -> subformula assignment -> mist_cf_score
-model -> ranked (cand_form, cand_ion) per spectrum.
+Pipeline: mass decomposition (per spectrum's precursor m/z + resolved ion
+mode, via the pure-Python mass_decomp engine by default -- no SIRIUS install
+needed) -> subformula assignment -> mist_cf_score model -> ranked
+(cand_form, cand_ion) per spectrum.
 
 Ion mode (positive/negative) is required to pick which adducts to decompose
 against, and is resolved per spectrum in one of two ways:
@@ -32,8 +40,22 @@ against, and is resolved per spectrum in one of two ways:
                    for MGFs where the adduct itself is unknown (the whole point
                    of this script is normally to predict it).
 --adduct-key is tried first when both are given and resolves to a known
-adduct; the model still predicts which specific adduct within that mode.
+adduct; the model still predicts which specific adduct within that mode
+(unless --known-adduct is given, see below).
 Spectra for which neither resolves are skipped (not aborted).
+
+--known-adduct restricts each spectrum's candidate generation to its OWN
+resolved adduct (from --adduct-key) instead of every adduct of its mode --
+useful when you already know the adduct and only need the formula. Requires
+--adduct-key (a mode-only signal from --ionmode-key isn't specific enough).
+Unlike the normal skip-and-continue policy above, --known-adduct is an
+explicit claim that adducts are known for the whole run: any spectrum whose
+--adduct-key value doesn't resolve to a specific valid adduct hard fails the
+run rather than being silently skipped or falling back to mode-only
+candidate generation. Best paired with a model trained via
+02_create_decoy_label.py --known-adduct; predicting with --known-adduct
+against a model trained without it is safe (just a smaller, still-valid
+candidate set) but under-uses what the model learned to discriminate.
 
 --benchmark reports the true (formula, adduct) retainment/accuracy at each
 pipeline stage -- mass decomp, the fast-filter cap (if used), and the
@@ -52,26 +74,41 @@ options:
   --id-key ID_KEY
   --precursor-mz-key PRECURSOR_MZ_KEY
   --adduct-key ADDUCT_KEY
-                        MGF field with an adduct; resolves ion mode via common.ion_mode_from_adduct.
+                        MGF field with an adduct; resolves ion mode via
+                        common.ion_mode_from_adduct.
   --ionmode-key IONMODE_KEY
-                        MGF field with ion-mode text ('positive'/'negative' or '+'/'-'); fallback when --adduct-key is
+                        MGF field with ion-mode text ('positive'/'negative' or
+                        '+'/'-'); fallback when --adduct-key is
                         absent/unresolvable.
   --instrument-key INSTRUMENT_KEY
   --instrument-override INSTRUMENT_OVERRIDE
   --default-instrument DEFAULT_INSTRUMENT
   --decomp-filter DECOMP_FILTER
   --decomp-ppm DECOMP_PPM
-  --elements ELEMENTS   SIRIUS element alphabet string; defaults to decomp.EL_STR_DEFAULT.
-  --adducts ADDUCTS     Comma-separated adducts to restrict candidate generation to (e.g. '[M+H]+,[M+Na]+' for a model trained
-                        on only those, per 02_create_decoy_label.py's --adducts). Each must be in common.ION_LST (aliases
-                        normalized). Default: every adduct of each spectrum's ion mode -- only safe if the checkpoint was
-                        trained on the full mode vocabulary.
+  --elements ELEMENTS   SIRIUS element alphabet string; defaults to
+                        decomp.EL_STR_DEFAULT.
+  --adducts ADDUCTS     Comma-separated adducts to restrict candidate
+                        generation to (e.g. '[M+H]+,[M+Na]+' for a model
+                        trained on only those, per 02_create_decoy_label.py's
+                        --adducts). Each must be in common.ION_LST (aliases
+                        normalized). Default: every adduct of each spectrum's
+                        ion mode -- only safe if the checkpoint was trained on
+                        the full mode vocabulary.
+  --known-adduct        Restrict each spectrum's candidate generation to its
+                        OWN resolved adduct (from --adduct-key) instead of
+                        every adduct of its mode. Requires --adduct-key. Hard
+                        fails (does not skip) on any spectrum whose adduct
+                        doesn't resolve to a specific valid adduct -- see
+                        module docstring.
   --fast-model FAST_MODEL
-                        Optional fast-filter checkpoint to cap candidates per spec before scoring.
+                        Optional fast-filter checkpoint to cap candidates per
+                        spec before scoring.
   --fast-num FAST_NUM   Candidates to keep per spec after fast filtering.
   --output-num OUTPUT_NUM
-                        Top candidates to keep per spectrum in the final output.
-  --benchmark           Report true-formula retainment/accuracy at each pipeline stage. Requires --benchmark-formula-
+                        Top candidates to keep per spectrum in the final
+                        output.
+  --benchmark           Report true-formula retainment/accuracy at each
+                        pipeline stage. Requires --benchmark-formula-
                         field/--benchmark-adduct-field on the MGF.
   --benchmark-formula-field BENCHMARK_FORMULA_FIELD
   --benchmark-adduct-field BENCHMARK_ADDUCT_FIELD
@@ -79,4 +116,16 @@ options:
   --num-workers NUM_WORKERS
   --gpu
   --debug
+```
+
+```{note}
+**Optional: known-adduct mode.** Pass `--known-adduct` (with `--adduct-key` set) when the adduct is
+already known for every spectrum you're predicting on and you only need the formula. Candidate
+generation is then restricted to each spectrum's own resolved adduct instead of every adduct of its
+mode, which also shrinks the mass-decomposition workload. This is safe to use regardless of how the
+checkpoint was trained, but pairs best with a model trained via `02_create_decoy_label.py
+--known-adduct` (see {doc}`retraining_mist_cf`) -- a model trained without it was never taught to
+discriminate between adducts, so it under-uses that training if you don't restrict at inference too;
+a model trained *with* it should always be run with `--known-adduct` at inference, since it was never
+trained to rank candidates across adducts.
 ```

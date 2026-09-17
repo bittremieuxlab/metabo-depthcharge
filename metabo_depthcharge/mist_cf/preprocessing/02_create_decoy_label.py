@@ -70,11 +70,36 @@ def get_args():
         "Default: every adduct of each spectrum's ion mode.",
     )
     parser.add_argument(
+        "--known-adduct",
+        action="store_true",
+        default=False,
+        help="Restrict each spectrum's candidate generation to its OWN true "
+        "adduct (the 'ionization' column) instead of every adduct of its ion "
+        "mode. Trains a formula-only discriminator: decoys never differ from "
+        "the true pair by adduct. Composes with --adducts (a spec whose true "
+        "adduct isn't in --adducts is dropped, with a warning). Every spec's "
+        "'ionization' must already be a valid adduct when this is set -- hard "
+        "fails (does not skip) otherwise, since --known-adduct is an explicit "
+        "claim that adducts are known for this whole run. A model trained this "
+        "way should be paired with predict_mgf.py --known-adduct at inference; "
+        "predicting without it is safe but wastes the restriction the model "
+        "was trained under.",
+    )
+    parser.add_argument(
         "--gpu",
         action="store_true",
         default=False,
         help="Run the fast-filter model on CUDA instead of CPU. Only affects the "
         "fast_filter sample strategy; no effect without --fast-model.",
+    )
+    parser.add_argument(
+        "--sirius-cache-dir",
+        type=str,
+        default=None,
+        help="Cache each SIRIUS batch's raw output here (decomp.iter_sirius_batches), "
+        "so a re-run after a crash/OOM skips already-completed batches instead of "
+        "redoing the (potentially multi-hour) decomp. Defaults to "
+        "<data-dir>/decoy_labels/sirius_cache_<decoy-suffix or decomp-filter>/.",
     )
     return parser.parse_args()
 
@@ -319,6 +344,10 @@ def main():
         args.max_pred_candidates if args.max_pred_candidates is not None else max_decoy
     )
     elements = args.elements
+    known_adduct = args.known_adduct
+
+    if decoy_suffix is None:
+        decoy_suffix = f"{decomp_filter}_knownadduct" if known_adduct else decomp_filter
 
     # Optional restriction of the candidate adduct universe (request: let a model
     # consider only a user-chosen adduct set). None => all adducts of each mode.
@@ -393,6 +422,24 @@ def main():
     specs = df["spec"].to_list()
     true_formulae = df["formula"].to_list()
     true_ionizations = df["ionization"].to_list()
+
+    if known_adduct:
+        # --known-adduct is an explicit claim that adducts are known for this
+        # whole run -- hard fail (not skip) if any spec's "ionization" isn't a
+        # valid canonical adduct, rather than silently degrading that spec.
+        bad = [
+            (s, ion)
+            for s, ion in zip(specs, true_ionizations, strict=False)
+            if common.ion_remap.get(ion, ion) not in common.ION_LST
+        ]
+        if bad:
+            raise SystemExit(
+                f"--known-adduct: {len(bad)}/{len(specs)} spectra have an 'ionization' "
+                f"that isn't a recognized adduct. Valid (canonical): {common.ION_LST}. "
+                f"First few offenders: {bad[:10]}"
+            )
+        true_ionizations = [common.ion_remap.get(ion, ion) for ion in true_ionizations]
+
     # Predicted precursor m/z of the true (formula, ion); folds in the n-mer
     # factor so [2M+...] precursors are placed correctly.
     true_masses = [
@@ -441,36 +488,65 @@ def main():
     # ion hypotheses, and we must not cross-contaminate their ions.
     spec_to_ion_masses = defaultdict(list)  # spec -> [(ion, mass), ...]
 
-    # Per-spec ion mode, derived from the (canonical) true-ion adduct sign.
-    # Each spectrum only considers adducts of its own mode — no [M+H]+ decoys
-    # for a [M-H]- spectrum, etc.
-    spec_modes = [common.ion_mode_from_adduct(ion) for ion in true_ionizations]
     specs_arr = np.array(specs)
     precursor_mz_arr = np.array(precursor_mz)
-    modes_arr = np.array(spec_modes)
 
     # First pass: enumerate every (spec, ion, neutral mass) triple WITHOUT
     # calling SIRIUS. SIRIUS decomp depends only on the neutral mass, so we
     # defer it until we have the global union of masses across all ions.
-    for mode, ion_subset in common.ion_mode_to_ions.items():
-        mask = modes_arr == mode
-        if not mask.any():
-            continue
-        mode_specs = specs_arr[mask]
-        mode_pmz = precursor_mz_arr[mask]
-        for ion in ion_subset:
-            # Optionally restrict the candidate adduct universe (e.g. a model
-            # trained only on [M+H]+/[M+Na]+ should consider only those).
+    if known_adduct:
+        # Each spectrum only ever generates candidates against its OWN true
+        # adduct, not every adduct of its mode -- decoys can never differ from
+        # the true pair by adduct, so the model trains as a formula-only
+        # discriminator. Grouped by unique ion value the same way the default
+        # path groups by mode, just at finer granularity.
+        ions_arr = np.array(true_ionizations)
+        n_dropped_by_adducts = 0
+        for ion in np.unique(ions_arr):
             if allowed_ions is not None and ion not in allowed_ions:
+                n_dropped_by_adducts += int((ions_arr == ion).sum())
                 continue
-            # Neutral *monomer* mass for SIRIUS; divides out the n-mer factor so
-            # [2M+...] candidates decompose the correct monomer mass.
+            mask = ions_arr == ion
+            ion_specs = specs_arr[mask]
+            ion_pmz = precursor_mz_arr[mask]
             decoy_masses = [
-                common.precursor_mz_to_neutral_mass(pm, ion) for pm in mode_pmz
+                common.precursor_mz_to_neutral_mass(pm, ion) for pm in ion_pmz
             ]
             decoy_masses = decomp.get_rounded_masses(decoy_masses)
-            for spec, mass in zip(mode_specs, decoy_masses, strict=False):
+            for spec, mass in zip(ion_specs, decoy_masses, strict=False):
                 spec_to_ion_masses[spec].append((ion, mass))
+        if n_dropped_by_adducts:
+            print(
+                f"--known-adduct + --adducts: dropped {n_dropped_by_adducts}/{len(specs)} "
+                f"spectra whose true adduct is outside --adducts."
+            )
+    else:
+        # Per-spec ion mode, derived from the (canonical) true-ion adduct sign.
+        # Each spectrum only considers adducts of its own mode — no [M+H]+
+        # decoys for a [M-H]- spectrum, etc.
+        spec_modes = [common.ion_mode_from_adduct(ion) for ion in true_ionizations]
+        modes_arr = np.array(spec_modes)
+        for mode, ion_subset in common.ion_mode_to_ions.items():
+            mask = modes_arr == mode
+            if not mask.any():
+                continue
+            mode_specs = specs_arr[mask]
+            mode_pmz = precursor_mz_arr[mask]
+            for ion in ion_subset:
+                # Optionally restrict the candidate adduct universe (e.g. a
+                # model trained only on [M+H]+/[M+Na]+ should consider only
+                # those).
+                if allowed_ions is not None and ion not in allowed_ions:
+                    continue
+                # Neutral *monomer* mass for SIRIUS; divides out the n-mer
+                # factor so [2M+...] candidates decompose the correct monomer
+                # mass.
+                decoy_masses = [
+                    common.precursor_mz_to_neutral_mass(pm, ion) for pm in mode_pmz
+                ]
+                decoy_masses = decomp.get_rounded_masses(decoy_masses)
+                for spec, mass in zip(mode_specs, decoy_masses, strict=False):
+                    spec_to_ion_masses[spec].append((ion, mass))
 
     # Single global SIRIUS call over the union of neutral masses across all
     # (spec, ion) pairs. Dedup happens inside run_sirius, so overlapping
@@ -481,6 +557,10 @@ def main():
     print(
         f"Global SIRIUS decomp over {len(all_masses)} unique neutral masses across all ions..."
     )
+    sirius_cache_dir = args.sirius_cache_dir
+    if sirius_cache_dir is None:
+        sirius_cache_dir = Path(data_dir) / "decoy_labels" / f"sirius_cache_{decoy_suffix}"
+    print(f"  Caching raw SIRIUS batch output to {sirius_cache_dir} for restart.")
     sirius_kwargs = {
         "filter_": decomp_filter,
         "ppm": 10,
@@ -488,31 +568,43 @@ def main():
         "cores": num_workers if num_workers > 0 else 1,
         "max_batch": args.max_batch,
         "mass_sort": False,
+        "cache_dir": sirius_cache_dir,
     }
     if elements is not None:
         sirius_kwargs["el_str"] = elements
 
-    # Stream one SIRIUS batch at a time (decomp.iter_sirius_batches) instead of
-    # run_sirius, which merges every batch into one Python dict before
-    # returning anything. That dict holds every mass's full candidate-formula
-    # list as native Python str/list objects simultaneously — see
-    # decomp.run_sirius's docstring: it already OOM'd once at ~200k masses
-    # with a permissive element alphabet, and this call is 912k+ masses with
-    # the same alphabet, well past that. Converting each batch straight to a
-    # numpy string array as it arrives (fixed-width dtype, no per-element
-    # object overhead) instead of leaving it as a Python dict/list bounds peak
-    # memory to one batch's decompositions rather than the whole run.
+    # Stream one SIRIUS batch at a time (decomp.iter_sirius_batches) AND dedup
+    # formulas incrementally into a formula->id table as batches arrive.
+    # Nearby masses under a permissive alphabet share huge overlapping
+    # candidate sets, so the *raw* (mass, candidate) occurrence count can be
+    # far larger than the number of distinct formulas -- concatenating every
+    # occurrence into one array first (the previous approach here, and what
+    # decomp.run_sirius does internally) holds that whole undeduplicated
+    # blob in memory at once and OOM'd even after batching the SIRIUS calls
+    # themselves. Deduping on the fly means we only ever hold: one copy of
+    # each distinct formula string (form_to_id), plus a per-mass array of
+    # int32 ids (4 bytes/occurrence, not the full string) -- both far smaller
+    # than the raw occurrence blob.
     print("Encoding SIRIUS decomp output into flat numpy arrays...")
+    form_to_id = {}
     mass_chunks = []
-    forms_chunks = []
+    idx_chunks = []
     for _, batch_masses, batch_dict in decomp.iter_sirius_batches(
         all_masses, **sirius_kwargs
     ):
         for m in batch_masses:
             cands = batch_dict.get(m, [])
-            if cands:
-                mass_chunks.append(m)
-                forms_chunks.append(np.array(cands))
+            if not cands:
+                continue
+            ids = np.empty(len(cands), dtype=np.int32)
+            for i, c in enumerate(cands):
+                fid = form_to_id.get(c)
+                if fid is None:
+                    fid = len(form_to_id)
+                    form_to_id[c] = fid
+                ids[i] = fid
+            mass_chunks.append(m)
+            idx_chunks.append(ids)
 
     # Layout is CSR: masses_arr (sorted unique masses) + offsets_arr index
     # into formula_idx_arr, whose entries are positions into the sorted
@@ -520,19 +612,28 @@ def main():
     sort_order = np.argsort(mass_chunks) if mass_chunks else np.array([], dtype=np.int64)
     masses_arr = np.array(mass_chunks, dtype=np.float64)[sort_order]
     lengths = np.fromiter(
-        (len(forms_chunks[i]) for i in sort_order), dtype=np.int64, count=len(sort_order)
+        (len(idx_chunks[i]) for i in sort_order), dtype=np.int64, count=len(sort_order)
     )
     offsets_arr = np.zeros(len(masses_arr) + 1, dtype=np.int64)
     np.cumsum(lengths, out=offsets_arr[1:])
-    if len(forms_chunks):
-        flat_forms = np.concatenate([forms_chunks[i] for i in sort_order])
-    else:
-        flat_forms = np.array([], dtype="<U1")
-    del mass_chunks, forms_chunks, lengths, sort_order
+    raw_idx_arr = (
+        np.concatenate([idx_chunks[i] for i in sort_order])
+        if len(idx_chunks)
+        else np.array([], dtype=np.int32)
+    )
+    del mass_chunks, idx_chunks, lengths, sort_order
 
-    unique_forms = np.unique(flat_forms)
-    formula_idx_arr = np.searchsorted(unique_forms, flat_forms).astype(np.int32)
-    del flat_forms
+    # unique_forms must be alphabetically sorted (filter_spec_entries and the
+    # true-formula lookup below binary-search into it), but form_to_id was
+    # built in first-seen order, so remap raw_idx_arr onto sorted positions.
+    raw_unique_forms = np.array(list(form_to_id.keys()))
+    del form_to_id
+    sort_forms = np.argsort(raw_unique_forms)
+    unique_forms = raw_unique_forms[sort_forms]
+    remap = np.empty(len(sort_forms), dtype=np.int32)
+    remap[sort_forms] = np.arange(len(sort_forms), dtype=np.int32)
+    formula_idx_arr = remap[raw_idx_arr]
+    del raw_unique_forms, sort_forms, remap, raw_idx_arr
     print(f"{len(unique_forms)} unique candidate formulae across all masses.")
 
     # Map each spec's true formula onto its position in unique_forms (-1 if
@@ -666,9 +767,6 @@ def main():
 
     save_dir = labels_file.parent / "decoy_labels"
     save_dir.mkdir(exist_ok=True)
-
-    if decoy_suffix is None:
-        decoy_suffix = f"{decomp_filter}"
 
     save_path = save_dir / f"decoy_label_{decoy_suffix}.tsv"
     print(f"Save to {save_path}")
