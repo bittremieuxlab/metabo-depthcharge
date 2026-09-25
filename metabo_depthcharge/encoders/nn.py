@@ -109,7 +109,7 @@ class AttnAggregator(nn.Module):
         if mask is not None:
             attn_logits = attn_logits.masked_fill(mask.unsqueeze(-1), float("-inf"))
 
-        attn_values = attn_logits.softmax(dim=-2)  # ..., L, 1
+        attn_values = attn_logits.softmax(dim=-2).nan_to_num(0.0)  # ..., L, 1
 
         return (x * attn_values).sum(-2)  # ..., D
 
