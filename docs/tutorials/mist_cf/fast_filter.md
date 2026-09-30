@@ -26,11 +26,19 @@ from pyteomics import mgf
 mgf_path = "spectra.mgf"
 alphabet = "C[0-]N[0-]O[0-]H[0-]S[0-3]P[0-1]I[0-1]Cl[0-3]F[0-6]Br[0-1]"
 
-budget = {el: int(hi) if hi else float("inf")
-          for el, _, hi in re.findall(r"([A-Z][a-z]*)\[(\d+)-(\d*)\]", alphabet)}
-fits = lambda f: all(el in budget and int(n or 1) <= budget[el]
-                     for el, n in re.findall(r"([A-Z][a-z]*)(\d*)", f))
-forms = [s["params"]["formula"] for s in mgf.read(mgf_path, use_index=False) if "formula" in s["params"]]
+budget = {
+    el: int(hi) if hi else float("inf")
+    for el, _, hi in re.findall(r"([A-Z][a-z]*)\[(\d+)-(\d*)\]", alphabet)
+}
+fits = lambda f: all(
+    el in budget and int(n or 1) <= budget[el]
+    for el, n in re.findall(r"([A-Z][a-z]*)(\d*)", f)
+)
+forms = [
+    s["params"]["formula"]
+    for s in mgf.read(mgf_path, use_index=False)
+    if "formula" in s["params"]
+]
 print(f"{sum(map(fits, forms)) / len(forms):.1%} covered ({len(forms)} formulae)")
 ```
 
