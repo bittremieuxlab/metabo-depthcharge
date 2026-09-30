@@ -12,6 +12,7 @@ import torch
 from torch.utils.data.dataset import Dataset
 
 from .. import common
+from ..common.subform_store import open_subforms
 
 
 cat_types = {"frags": 0, "cls": 1}
@@ -140,7 +141,7 @@ class FormDataset(Dataset):
         self.spec_names = self.df["spec"].values
         self.instruments = self.df["instrument"].values
         self.parentmasses = self.df["parentmass"].values
-        self.json_paths = [subform_dir / f"{i}.json" for i in self.spec_names]
+        self.subforms = open_subforms(subform_dir)
         self.true_formulae = self.df["formula"].values
         self.true_ions = self.df["ionization"].values
 
@@ -165,7 +166,6 @@ class FormDataset(Dataset):
         true_ion = self.true_ions[idx]
 
         parentmass = self.parentmasses[idx]
-        json_file_path = self.json_paths[idx]
 
         full_decoy_idx_list = list(range(len(decoy_formulae)))
         num_decoys = len(full_decoy_idx_list)
@@ -178,13 +178,12 @@ class FormDataset(Dataset):
         decoy_formulae = decoy_formulae[sample_inds].tolist()
         decoy_ions = decoy_ions[sample_inds].tolist()
 
-        with open(json_file_path) as openfile:
-            json_object = json.load(openfile)
+        json_object = self.subforms[name]
 
         if true_formula not in json_object or true_ion not in json_object[true_formula]:
             raise KeyError(
                 f"True (formula, ion) = ({true_formula}, {true_ion}) missing "
-                f"from {json_file_path}. Regenerate subformula JSONs."
+                f"from {name} in {self.subforms.path}. Regenerate subformula assignments."
             )
         true_json = self.json_extractor.extract_json(
             json_obj=json_object[true_formula][true_ion],
@@ -331,6 +330,7 @@ class PredDataset(Dataset):
         self.df = df
         self.num_workers = num_workers
         self.subform_dir = Path(subform_dir)
+        self.subforms = open_subforms(subform_dir)
         self.max_subpeak = max_subpeak
         self.ablate_cls_error = ablate_cls_error
         self.json_extractor = JsonExtractor(max_subpeak=max_subpeak)
@@ -362,9 +362,7 @@ class PredDataset(Dataset):
     def __getitem__(self, idx):
         spec_name = self.new_ind_to_name[idx]
 
-        json_file_path = f"{self.subform_dir}/{spec_name}.json"
-        with open(json_file_path) as openfile:
-            json_object = json.load(openfile)
+        json_object = self.subforms[spec_name]
 
         out_dict = defaultdict(lambda: [])
         for list_idx in self.new_ind_to_old_inds[idx]:

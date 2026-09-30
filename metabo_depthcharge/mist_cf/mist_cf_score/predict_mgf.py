@@ -2,8 +2,9 @@
 # Licensed under MIT License - see LICENSE in this directory
 """predict_mgf.py - Predict molecular formulae for a raw MGF, no ground truth needed.
 
-Pipeline: SIRIUS mass decomposition (per spectrum's precursor m/z + resolved
-ion mode) -> subformula assignment -> mist_cf_score model -> ranked
+Pipeline: mass decomposition (per spectrum's precursor m/z + resolved ion
+mode, via the pure-Python mass_decomp engine by default -- no SIRIUS install
+needed) -> subformula assignment -> mist_cf_score model -> ranked
 (cand_form, cand_ion) per spectrum.
 
 Ion mode (positive/negative) is required to pick which adducts to decompose
@@ -15,11 +16,25 @@ against, and is resolved per spectrum in one of two ways:
                    for MGFs where the adduct itself is unknown (the whole point
                    of this script is normally to predict it).
 --adduct-key is tried first when both are given and resolves to a known
-adduct; the model still predicts which specific adduct within that mode.
+adduct; the model still predicts which specific adduct within that mode
+(unless --known-adduct is given, see below).
 Spectra for which neither resolves are skipped (not aborted).
 
+--known-adduct restricts each spectrum's candidate generation to its OWN
+resolved adduct (from --adduct-key) instead of every adduct of its mode --
+useful when you already know the adduct and only need the formula. Requires
+--adduct-key (a mode-only signal from --ionmode-key isn't specific enough).
+Unlike the normal skip-and-continue policy above, --known-adduct is an
+explicit claim that adducts are known for the whole run: any spectrum whose
+--adduct-key value doesn't resolve to a specific valid adduct hard fails the
+run rather than being silently skipped or falling back to mode-only
+candidate generation. Best paired with a model trained via
+02_create_decoy_label.py --known-adduct; predicting with --known-adduct
+against a model trained without it is safe (just a smaller, still-valid
+candidate set) but under-uses what the model learned to discriminate.
+
 --benchmark reports the true (formula, adduct) retainment/accuracy at each
-pipeline stage -- SIRIUS decomp, the fast-filter cap (if used), and the
+pipeline stage -- mass decomp, the fast-filter cap (if used), and the
 mist_cf model at top-1/5/10 -- using ground truth read from
 --benchmark-formula-field/--benchmark-adduct-field. The mist_cf model's
 top-1/5/10 accuracy is also broken down per ground-truth adduct. The
@@ -88,6 +103,15 @@ def get_args():
         "be in common.ION_LST (aliases normalized). Default: every adduct of each spectrum's ion "
         "mode -- only safe if the checkpoint was trained on the full mode vocabulary.",
     )
+    parser.add_argument(
+        "--known-adduct",
+        action="store_true",
+        default=False,
+        help="Restrict each spectrum's candidate generation to its OWN resolved adduct "
+        "(from --adduct-key) instead of every adduct of its mode. Requires --adduct-key. "
+        "Hard fails (does not skip) on any spectrum whose adduct doesn't resolve to a "
+        "specific valid adduct -- see module docstring.",
+    )
 
     parser.add_argument("--fast-model", default=None, help="Optional fast-filter checkpoint to cap candidates per spec before scoring.")
     parser.add_argument("--fast-num", type=int, default=None, help="Candidates to keep per spec after fast filtering.")
@@ -124,6 +148,21 @@ def resolve_ion_mode(meta_ci, adduct_key, ionmode_key):
     return None
 
 
+def resolve_adduct(meta_ci, adduct_key):
+    """Canonical adduct string for a spectrum (e.g. "[M+H]+"), or None if
+    --adduct-key is absent or doesn't resolve to a specific valid adduct.
+    Unlike resolve_ion_mode, this never falls back to --ionmode-key -- a mode
+    ("pos"/"neg") isn't a specific adduct, so there's nothing to fall back to.
+    """
+    if not adduct_key:
+        return None
+    raw = meta_ci.get(adduct_key.upper())
+    if not raw:
+        return None
+    canon = common.standardize_adduct(str(raw), fail_silent=True)
+    return canon if canon in common.ION_LST else None
+
+
 def canon_formula(formula):
     """Round-trip a formula string through common's dense-vector encoding so
     it's comparable to SIRIUS/model output regardless of element order in the
@@ -141,6 +180,10 @@ def predict_mgf():
     kwargs = args.__dict__
     debug = kwargs["debug"]
     benchmark = kwargs["benchmark"]
+    known_adduct = kwargs["known_adduct"]
+
+    if known_adduct and not kwargs["adduct_key"]:
+        raise SystemExit("--known-adduct requires --adduct-key (nothing to resolve a specific adduct from).")
 
     save_dir = Path(kwargs["save_dir"])
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -181,6 +224,7 @@ def predict_mgf():
     seen_ids = {}
     skipped = []
     n_bench_missing = 0
+    known_adduct_failures = []
     for i, (meta, spectra) in enumerate(tqdm(parsed, desc=next_step("Resolving spectra"))):
         meta_ci = {str(k).upper(): v for k, v in meta.items()}
 
@@ -207,6 +251,16 @@ def predict_mgf():
             skipped.append((spec_id, "unresolvable ion mode"))
             continue
 
+        adduct = None
+        if known_adduct:
+            adduct = resolve_adduct(meta_ci, kwargs["adduct_key"])
+            if adduct is None:
+                # --known-adduct is an explicit claim adducts are known for the
+                # whole run: collect every offender and hard fail below rather
+                # than skip this spectrum or silently fall back to mode-only
+                # candidate generation for it.
+                known_adduct_failures.append((spec_id, field(kwargs["adduct_key"])))
+
         if kwargs["instrument_override"]:
             instrument = kwargs["instrument_override"]
         else:
@@ -222,6 +276,7 @@ def predict_mgf():
         resolved[spec_id] = {
             "precursor_mz": precursor_mz,
             "mode": mode,
+            "adduct": adduct,
             "instrument": instrument,
             "peaks": peaks,
         }
@@ -245,6 +300,12 @@ def predict_mgf():
 
     if skipped:
         logging.warning(f"Skipped {len(skipped)}/{len(parsed)} spectra: {skipped[:10]}{' ...' if len(skipped) > 10 else ''}")
+    if known_adduct_failures:
+        raise SystemExit(
+            f"--known-adduct: {len(known_adduct_failures)}/{len(parsed)} spectra have an "
+            f"--adduct-key value that isn't a recognized specific adduct. Valid (canonical): "
+            f"{common.ION_LST}. First few offenders (spec, raw value): {known_adduct_failures[:10]}"
+        )
     if not resolved:
         raise SystemExit("No spectra resolved; nothing to predict.")
     logging.info(f"Resolved {len(resolved)}/{len(parsed)} spectra")
@@ -282,23 +343,47 @@ def predict_mgf():
         logging.info(f"Restricting candidate adducts to: {sorted(allowed_ions)}")
 
     # --- Mass-only candidate generation: global SIRIUS decomp over the union
-    # of neutral masses across all (spec, ion-of-its-mode) pairs. No ground
-    # truth formula involved anywhere in this pipeline. ---
+    # of neutral masses across all (spec, ion) pairs. No ground truth formula
+    # involved anywhere in this pipeline. ---
     spec_to_ion_masses = defaultdict(list)
-    for mode, ion_subset in common.ion_mode_to_ions.items():
-        mode_specs = [s for s, r in resolved.items() if r["mode"] == mode]
-        if not mode_specs:
-            continue
-        for ion in ion_subset:
+    if known_adduct:
+        # Each spectrum only ever generates candidates against its OWN
+        # resolved adduct, not every adduct of its mode.
+        n_dropped_by_adducts = 0
+        by_adduct = defaultdict(list)
+        for s, r in resolved.items():
+            by_adduct[r["adduct"]].append(s)
+        for ion, ion_specs in by_adduct.items():
             if allowed_ions is not None and ion not in allowed_ions:
+                n_dropped_by_adducts += len(ion_specs)
                 continue
             masses = [
                 common.precursor_mz_to_neutral_mass(resolved[s]["precursor_mz"], ion)
-                for s in mode_specs
+                for s in ion_specs
             ]
             masses = decomp.get_rounded_masses(masses)
-            for s, m in zip(mode_specs, masses, strict=False):
+            for s, m in zip(ion_specs, masses, strict=False):
                 spec_to_ion_masses[s].append((ion, m))
+        if n_dropped_by_adducts:
+            logging.warning(
+                f"--known-adduct + --adducts: dropped {n_dropped_by_adducts}/{len(resolved)} "
+                f"spectra whose resolved adduct is outside --adducts."
+            )
+    else:
+        for mode, ion_subset in common.ion_mode_to_ions.items():
+            mode_specs = [s for s, r in resolved.items() if r["mode"] == mode]
+            if not mode_specs:
+                continue
+            for ion in ion_subset:
+                if allowed_ions is not None and ion not in allowed_ions:
+                    continue
+                masses = [
+                    common.precursor_mz_to_neutral_mass(resolved[s]["precursor_mz"], ion)
+                    for s in mode_specs
+                ]
+                masses = decomp.get_rounded_masses(masses)
+                for s, m in zip(mode_specs, masses, strict=False):
+                    spec_to_ion_masses[s].append((ion, m))
 
     all_masses = sorted({m for lst in spec_to_ion_masses.values() for _, m in lst})
     logging.info(f"{len(all_masses)} unique neutral masses to decompose")
@@ -308,7 +393,7 @@ def predict_mgf():
         loglevel="NONE",
         cores=num_workers if num_workers > 0 else 1,
         mass_sort=False,
-        desc=next_step("SIRIUS decomp"),
+        desc=next_step("Mass decomp"),
     )
     if kwargs["elements"] is not None:
         sirius_kwargs["el_str"] = kwargs["elements"]
@@ -358,9 +443,9 @@ def predict_mgf():
                     "instrument": resolved[spec]["instrument"],
                 }
             )
-    logging.info(f"SIRIUS decomp recovered candidates for {len(spec_to_ion_masses) - n_no_cands}/{len(spec_to_ion_masses)} spectra")
+    logging.info(f"Mass decomp recovered candidates for {len(spec_to_ion_masses) - n_no_cands}/{len(spec_to_ion_masses)} spectra")
     if not rows:
-        raise SystemExit("No candidates survived SIRIUS decomp for any spectrum.")
+        raise SystemExit("No candidates survived mass decomposition for any spectrum.")
     label_df = pd.DataFrame(rows)
     label_df.to_csv(save_dir / "pred_labels.tsv", sep="\t", index=None)
 
@@ -466,7 +551,7 @@ def predict_mgf():
 
         report_lines = [
             f"=== Benchmark (n={n_bench} spectra with usable ground truth) ===",
-            f"Stage 1 (SIRIUS decomp)        : {stage1_recall:.1%} true formula retained",
+            f"Stage 1 (mass decomp)          : {stage1_recall:.1%} true formula retained",
             "Stage 2 (+ fast filter)        : "
             + (f"{stage2_recall:.1%} true formula retained" if stage2_recall is not None else "not used (no --fast-model)"),
             f"Stage 3 (mist_cf model) top-1  : {stage3_recall[1]:.1%} accuracy",

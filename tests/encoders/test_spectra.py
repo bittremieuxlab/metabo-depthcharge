@@ -13,7 +13,11 @@ from metabo_depthcharge.encoders import (  # noqa: E402
     SpectrumEncoder,
     SubformulaEncoder,
 )
-from metabo_depthcharge.mist_cf.common.chem_utils import ELEMENT_DIM  # noqa: E402
+from metabo_depthcharge.encoders.spectra import FLARE_ELEMENT_NORM  # noqa: E402
+from metabo_depthcharge.mist_cf.common.chem_utils import (  # noqa: E402
+    ELEMENT_DIM,
+    VALID_ELEMENTS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -278,3 +282,199 @@ def test_spectrum_encoder_with_subformulae():
     with torch.no_grad():
         out = enc(mz, intensity, precursor_mz, subformulae=subformulae)
     assert out.shape == (B, D_MODEL)
+
+
+# --- Configurable peak-embedding paths --------------------------------------
+
+
+def _spec_batch(b=3, length=6, n_elem=18):
+    mz = torch.rand(b, length) * 500 + 50
+    intensity = torch.rand(b, length)
+    for i in range(b):  # ragged padding, so mask handling is actually exercised
+        mz[i, length - i :] = 0.0
+        intensity[i, length - i :] = 0.0
+    return {
+        "mz": mz,
+        "intensity": intensity,
+        "precursor_mz": mz.max(dim=1).values + 1.0,
+        "subformulae": {
+            "form_vec": torch.randint(0, 5, (b, length, n_elem)),
+            "parent_form_vec": torch.randint(0, 5, (b, n_elem)),
+        },
+    }
+
+
+def test_float_norm_flare_preset_maps_by_symbol_and_pads_with_ones():
+    """Elements outside FLARE's own 14-element vocabulary must default to 1.0."""
+    enc = SubformulaEncoder(64, form_embedder="float", float_norm="flare")
+    norm = enc.form_encoder.norm_vec
+    assert norm.shape == (len(VALID_ELEMENTS),)
+    for el, value in FLARE_ELEMENT_NORM.items():
+        assert norm[VALID_ELEMENTS.index(el)] == value
+    covered = set(FLARE_ELEMENT_NORM)
+    for el in VALID_ELEMENTS:
+        if el not in covered:
+            assert norm[VALID_ELEMENTS.index(el)] == 1.0
+
+
+def test_flare_equivalent_subformula_encoder_shape():
+    """form_embedder='float' + use_complement=False + mlp_dims reproduces FLARE's path.
+
+    float_norm defaults to "flare", so nothing extra needs to be passed.
+    """
+    enc = SubformulaEncoder(
+        64,
+        form_embedder="float",
+        use_complement=False,
+        mlp_dims=(32, 64),
+    ).eval()
+    form = torch.randint(0, 5, (3, 6, 18))
+    with torch.no_grad():
+        out = enc(form, None)
+    assert out.shape == (3, 6, 64)
+
+
+def test_float_norm_mistcf_preset_matches_common_norm_vec():
+    from metabo_depthcharge.mist_cf.common.chem_utils import NORM_VEC
+
+    enc = SubformulaEncoder(64, form_embedder="float", float_norm="mistcf")
+    assert torch.allclose(
+        enc.form_encoder.norm_vec, torch.tensor(NORM_VEC, dtype=torch.float32)
+    )
+
+
+def test_float_norm_custom_sequence():
+    custom = [2.0] * len(VALID_ELEMENTS)
+    enc = SubformulaEncoder(64, form_embedder="float", float_norm=custom)
+    assert torch.allclose(enc.form_encoder.norm_vec, torch.tensor(custom))
+
+
+def test_float_norm_unknown_preset_raises():
+    with pytest.raises(ValueError, match="Unknown float_norm preset"):
+        SubformulaEncoder(64, form_embedder="float", float_norm="bogus")
+
+
+def test_float_norm_ignored_for_non_float_embedder():
+    """A non-'float' embedder shouldn't care what float_norm is (even the default)."""
+    enc = SubformulaEncoder(64, form_embedder="abs-sines", float_norm="bogus")
+    assert not hasattr(enc.form_encoder, "norm_vec")
+
+
+def test_mlp_dims_rejects_mismatched_width():
+    with pytest.raises(ValueError, match="d_model"):
+        SubformulaEncoder(64, mlp_dims=(32, 128))
+
+
+def test_mlp_dims_with_complement_doubles_input_width():
+    enc = SubformulaEncoder(64, "abs-sines", use_complement=True, mlp_dims=(256, 64))
+    assert enc.layers[0].in_features == enc.form_encoder.full_dim * 2
+
+
+def test_subformula_encoder_use_complement_false_ignores_parent():
+    enc = SubformulaEncoder(64, "abs-sines", use_complement=False).eval()
+    form = torch.randint(0, 5, (3, 6, 18))
+    with torch.no_grad():
+        a = enc(form, torch.randint(0, 5, (3, 18)))
+        b = enc(form, torch.randint(0, 9, (3, 18)))
+    assert torch.equal(a, b)
+
+
+def test_subformula_encoder_use_complement_false_halves_proj_width():
+    enc = SubformulaEncoder(64, "abs-sines", use_complement=False)
+    assert enc.proj.in_features == enc.form_encoder.full_dim
+
+
+def test_peak_encoder_use_mz_false_ignores_mz_but_keeps_intensity():
+    enc = PeakEncoder(
+        d_model=32, min_mz_wavelength=0.001, max_mz_wavelength=10_000, use_mz=False
+    )
+    mz1, mz2 = torch.rand(4, 10) * 500, torch.rand(4, 10) * 500
+    intensity = torch.rand(4, 10)
+    x1 = torch.stack([mz1, intensity], dim=2)
+    x2 = torch.stack([mz2, intensity], dim=2)
+    assert torch.allclose(
+        enc(x1), enc(x2)
+    )  # different m/z, same intensity -> same output
+
+    x3 = torch.stack([mz1, torch.rand(4, 10)], dim=2)
+    assert not torch.allclose(
+        enc(x1), enc(x3)
+    )  # different intensity -> different output
+
+
+def test_use_mz_false_keeps_peak_encoder_module():
+    """use_mz=False must still build peak_encoder (it still encodes intensity)."""
+    enc = SpectrumEncoder(
+        d_model=64,
+        n_layers=1,
+        nhead=2,
+        pool=None,
+        use_mz=False,
+        subformula_encoder=SubformulaEncoder(64, mlp_dims=(32, 64)),
+    )
+    assert enc.peak_encoder is not None
+    assert enc.peak_encoder.mz_encoder is not None
+    assert any("peak_encoder" in k for k in enc.state_dict())
+
+
+def test_use_mz_false_drops_precursor_mz_from_global_token_too():
+    """use_mz=False must keep precursor m/z out of the model, not just peak m/z."""
+    enc = SpectrumEncoder(
+        d_model=64,
+        n_layers=1,
+        nhead=2,
+        pool=None,
+        use_mz=False,
+        subformula_encoder=SubformulaEncoder(64, mlp_dims=(32, 64)),
+    ).eval()
+    batch = _spec_batch()
+    with torch.no_grad():
+        out1, _ = enc(**batch)
+        out2, _ = enc(**{**batch, "precursor_mz": batch["precursor_mz"] + 100.0})
+    assert torch.allclose(out1, out2, atol=1e-6)
+
+
+def test_global_token_false_drops_the_cls_and_its_token():
+    enc = SpectrumEncoder(
+        d_model=64,
+        n_layers=1,
+        nhead=2,
+        pool=None,
+        use_mz=False,
+        use_global_token=False,
+        subformula_encoder=SubformulaEncoder(64, mlp_dims=(32, 64)),
+    ).eval()
+    assert enc.precursor_cls is None
+    batch = _spec_batch()
+    with torch.no_grad():
+        out, pad = enc(**batch)
+    assert out.shape[1] == batch["mz"].shape[1]  # no prepended token
+
+
+def test_norm_first_builds_a_pre_norm_stack():
+    enc = SpectrumEncoder(d_model=64, n_layers=1, nhead=2, norm_first=True)
+    assert enc.transformer_encoder.layers[0].norm_first
+
+
+def test_invalid_configurations_raise():
+    mlp = SubformulaEncoder(64, mlp_dims=(32, 64))
+    with pytest.raises(ValueError, match="no m/z embedding path"):
+        SpectrumEncoder(d_model=64, n_layers=1, nhead=2, use_mz=False)
+    with pytest.raises(ValueError, match="pool='cls'"):
+        SpectrumEncoder(
+            d_model=64,
+            n_layers=1,
+            nhead=2,
+            pool="cls",
+            use_global_token=False,
+            subformula_encoder=mlp,
+        )
+    with pytest.raises(ValueError, match="use_global_token=True"):
+        SpectrumEncoder(
+            d_model=64,
+            n_layers=1,
+            nhead=2,
+            use_global_token=False,
+            subformula_encoder=mlp,
+            metadata_encoder=MetadataEncoder(64, ["adduct"]),
+        )

@@ -11,9 +11,6 @@ This tutorial will outline how to re-train the our vendored `mist-cf` implementa
 
 - A `labels.tsv` with columns `spec, formula, ionization, instrument, dataset`,
   and the corresponding `.ms` spectrum files under `spec_files/`.
-- For decoy generation:
-  [SIRIUS](https://bio.informatik.uni-jena.de/software/sirius/) — set
-  `$SIRIUS_PATH` and log in (tested on SIRIUS v6.3.3).
 - The `fast_filter_best.ckpt` model from the
   [MIST-CF repo](https://github.com/samgoldman97/mist-cf).
 
@@ -77,7 +74,7 @@ This is a **retraining** pipeline, so a ground-truth molecular formula is
 **required for every spectrum**.
 ```
 
-## 2. Generate decoys (negative candidate formulae) with SIRIUS
+## 2. Generate decoys (negative candidate formulae) via mass decomposition
 
 ```bash
 python -m metabo_depthcharge.mist_cf.preprocessing.02_create_decoy_label \
@@ -100,6 +97,17 @@ A model will, hence, also only ever be able to predict the adducts passed here.
 
 Note that the fast filter should be appropriate for your use-case.
 See {doc}`fast_filter` for when (and how) to retrain it.
+
+```{note}
+**Optional: known-adduct mode.** If the adduct is already known for every spectrum in your training
+data (typical for most labeled datasets) and will also be known at inference time, pass
+`--known-adduct` here. Instead of generating decoys across every adduct of a spectrum's ion mode, each
+spectrum's candidates are restricted to its own true adduct. The model then trains as a pure
+formula discriminator rather than jointly predicting (formula, adduct).
+
+A model trained with `--known-adduct` should be paired with `predict_mgf.py --known-adduct` at
+inference (see {doc}`using_mist_cf`) as it was never trained to discriminate between adducts.
+```
 
 ## 3. Build prediction labels and split.
 

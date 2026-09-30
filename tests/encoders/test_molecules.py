@@ -3,6 +3,9 @@ fingerprint/representation embedders (:class:`MolMLP`, :class:`MultiMolMLP`)."""
 
 import pytest
 
+from metabo_depthcharge.chem import Molecule, MoleculeToGraph, graphs
+from metabo_depthcharge.encoders import BondMolEncoder, GraphMolEncoder
+
 
 torch = pytest.importorskip("torch")
 
@@ -83,3 +86,89 @@ def test_multi_mol_embedder_mixed_types():
         "dns": torch.randn(3, 32),
     }
     assert emb(fps).shape == (3, 32)
+
+
+# --- Graph molecule encoders ---------------------------------------------
+
+
+GRAPH_SMILES = [
+    "CCO",
+    "c1ccccc1",
+    "CC(=O)Oc1ccccc1C(=O)O",
+    "CN1C=NC2=C1C(=O)N(C)C(=O)N2C",
+]
+
+
+@pytest.fixture
+def graph_table():
+    mols = [Molecule(s) for s in GRAPH_SMILES]
+    return graphs.pack(MoleculeToGraph()(mols), GRAPH_SMILES)
+
+
+@pytest.fixture
+def idx(graph_table):
+    """A batched graph covering every molecule, which is what an encoder takes."""
+    return graphs.gather(graph_table, torch.arange(len(GRAPH_SMILES)))
+
+
+def test_pooled_shape(idx):
+    enc = GraphMolEncoder([32, 64], 0.0, 64).eval()
+    assert enc(idx).shape == (len(GRAPH_SMILES), 64)
+
+
+def test_per_atom_returns_tokens_and_mask(idx):
+    enc = GraphMolEncoder([32, 64], 0.0, 64, per_atom=True).eval()
+    tokens, pad = enc(idx)
+    assert tokens.shape[:2] == pad.shape
+    for i, s in enumerate(GRAPH_SMILES):
+        assert (~pad[i]).sum() == Molecule(s).mol.GetNumAtoms()
+
+
+@pytest.mark.parametrize("channels", [[32, 64], [32, 48]])
+def test_padding_rows_stay_zero(idx, channels):
+    """Regression: `out` is a biased Linear when channels[-1] != d_model, and applying
+    it AFTER the scatter turns every padding row into `bias` -- which a scorer that
+    infers validity from nonzero rows then reads as a real atom."""
+    enc = GraphMolEncoder(channels, 0.0, 64, per_atom=True).eval()
+    tokens, pad = enc(idx)
+    assert pad.any(), "test needs ragged sizes to be meaningful"
+    assert tokens[pad].abs().sum() == 0
+
+
+def test_pooled_equals_mean_of_per_atom_tokens(idx):
+    torch.manual_seed(0)
+    pooled = GraphMolEncoder([32, 64], 0.0, 64).eval()
+    torch.manual_seed(0)
+    per_atom = GraphMolEncoder([32, 64], 0.0, 64, per_atom=True).eval()
+    with torch.no_grad():
+        a = pooled(idx)
+        tokens, pad = per_atom(idx)
+    keep = (~pad)[..., None]
+    b = (tokens * keep).sum(1) / keep.sum(1)
+    assert torch.allclose(a, b, atol=1e-5)
+
+
+@pytest.mark.parametrize("norm", ["batch", "layer"])
+def test_norm_choices_build_and_run(idx, norm):
+    enc = GraphMolEncoder([32, 64], 0.0, 64, norm=norm).eval()
+    assert enc(idx).shape == (len(GRAPH_SMILES), 64)
+
+
+def test_unknown_norm_raises():
+    with pytest.raises(ValueError, match="Unknown norm"):
+        GraphMolEncoder([32], 0.0, 32, norm="group")
+
+
+def test_bond_encoder_shapes(idx):
+    enc = BondMolEncoder([32, 64], 0.0, 64, per_atom=True).eval()
+    tokens, pad = enc(idx)
+    for i, s in enumerate(GRAPH_SMILES):
+        assert (~pad[i]).sum() == Molecule(s).mol.GetNumAtoms()
+
+
+def test_bond_tokens_emit_one_token_per_bond(idx):
+    enc = BondMolEncoder([32, 64], 0.0, 64, bond_tokens=True).eval()
+    tokens, pad = enc(idx)
+    for i, s in enumerate(GRAPH_SMILES):
+        assert (~pad[i]).sum() == Molecule(s).mol.GetNumBonds()
+    assert tokens[pad].abs().sum() == 0

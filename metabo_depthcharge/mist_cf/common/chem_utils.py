@@ -8,6 +8,7 @@ from functools import reduce
 
 import numpy as np
 import torch
+import zstandard as zstd
 from rdkit import Chem
 from rdkit.Chem import Atom
 from rdkit.Chem.Descriptors import ExactMolWt
@@ -103,6 +104,17 @@ _ION_LST_EXTRA = [
     "[2M-H]-",
     "[2M+HCOOH-H]-",
     "[2M+CH3COOH-H]-",
+    "[2M+Na-2H]-",
+    "[M-H2O]+",
+    "[M-CH3]-",
+    "[M-2H]-",
+    "[M]-",
+    "[2M+NH4]+",
+    "[M-H2O-H]-",
+    "[M-H5O3]+",
+    "[M+C2H4N]+",
+    "[M+2Na-H]+",
+    "[2M+K]+",
 ]
 ION_LST = _ION_LST_BASE + _ION_LST_EXTRA
 
@@ -124,6 +136,17 @@ ion_to_mode = {
     "[2M-H]-": "neg",
     "[2M+HCOOH-H]-": "neg",
     "[2M+CH3COOH-H]-": "neg",
+    "[2M+Na-2H]-": "neg",
+    "[M-H2O]+": "pos",
+    "[M-CH3]-": "neg",
+    "[M-2H]-": "neg",
+    "[M]-": "neg",
+    "[2M+NH4]+": "pos",
+    "[M-H2O-H]-": "neg",
+    "[M-H5O3]+": "pos",
+    "[M+C2H4N]+": "pos",
+    "[M+2Na-H]+": "pos",
+    "[2M+K]+": "pos",
 }
 assert set(ion_to_mode) == set(ION_LST), "ion_to_mode must cover exactly ION_LST"
 
@@ -137,6 +160,9 @@ ion_to_nmer.update(
         "[2M-H]-": 2,
         "[2M+HCOOH-H]-": 2,
         "[2M+CH3COOH-H]-": 2,
+        "[2M+Na-2H]-": 2,
+        "[2M+NH4]+": 2,
+        "[2M+K]+": 2,
     }
 )
 
@@ -218,6 +244,22 @@ ion_to_mass = {
     + 3 * ELEMENT_TO_MASS["H"]
     + 2 * ELEMENT_TO_MASS["O"]
     + ELECTRON_MASS,
+    "[2M+Na-2H]-": ELEMENT_TO_MASS["Na"]
+    - 2 * ELEMENT_TO_MASS["H"]
+    + ELECTRON_MASS,
+    "[M-H2O]+": -ELEMENT_TO_MASS["O"] - 2 * ELEMENT_TO_MASS["H"] - ELECTRON_MASS,
+    "[M-CH3]-": -ELEMENT_TO_MASS["C"] - 3 * ELEMENT_TO_MASS["H"] + ELECTRON_MASS,
+    "[M-2H]-": -2 * ELEMENT_TO_MASS["H"] + ELECTRON_MASS,
+    "[M]-": 0 + ELECTRON_MASS,
+    "[2M+NH4]+": ELEMENT_TO_MASS["N"] + ELEMENT_TO_MASS["H"] * 4 - ELECTRON_MASS,
+    "[M-H2O-H]-": -ELEMENT_TO_MASS["O"] - 3 * ELEMENT_TO_MASS["H"] + ELECTRON_MASS,
+    "[M-H5O3]+": -5 * ELEMENT_TO_MASS["H"] - 3 * ELEMENT_TO_MASS["O"] - ELECTRON_MASS,
+    "[M+C2H4N]+": 2 * ELEMENT_TO_MASS["C"]
+    + 4 * ELEMENT_TO_MASS["H"]
+    + ELEMENT_TO_MASS["N"]
+    - ELECTRON_MASS,
+    "[M+2Na-H]+": 2 * ELEMENT_TO_MASS["Na"] - ELEMENT_TO_MASS["H"] - ELECTRON_MASS,
+    "[2M+K]+": ELEMENT_TO_MASS["K"] - ELECTRON_MASS,
 }
 
 ion_to_add_vec = {
@@ -248,6 +290,19 @@ ion_to_add_vec = {
     "[2M+CH3COOH-H]-": 2 * element_to_position["C"]
     + 3 * element_to_position["H"]
     + 2 * element_to_position["O"],
+    "[2M+Na-2H]-": element_to_position["Na"] - 2 * element_to_position["H"],
+    "[M-H2O]+": -element_to_position["O"] - 2 * element_to_position["H"],
+    "[M-CH3]-": -element_to_position["C"] - 3 * element_to_position["H"],
+    "[M-2H]-": -2 * element_to_position["H"],
+    "[M]-": np.zeros_like(element_to_position["H"]),
+    "[2M+NH4]+": element_to_position["N"] + element_to_position["H"] * 4,
+    "[M-H2O-H]-": -element_to_position["O"] - 3 * element_to_position["H"],
+    "[M-H5O3]+": -5 * element_to_position["H"] - 3 * element_to_position["O"],
+    "[M+C2H4N]+": 2 * element_to_position["C"]
+    + 4 * element_to_position["H"]
+    + element_to_position["N"],
+    "[M+2Na-H]+": 2 * element_to_position["Na"] - element_to_position["H"],
+    "[2M+K]+": element_to_position["K"],
 }
 
 assert set(ion_to_mass) == set(ION_LST) == set(ion_to_add_vec), (
@@ -569,7 +624,7 @@ def get_output_dict(spec_name, spec, form, mass_diff_type, mass_diff_thresh, ion
     return output_dict
 
 
-def assign_single_spec(spec_name, export_dicts, output_dir):
+def _build_subform_dict(export_dicts):
     # Nested keying: {formula: {ion: {"cand_tbl": ...}}}
     # A single formula can legitimately pair with multiple ions (e.g. [M+H]+ and
     # [M+Na]+, or [M-H]- and [M+H]+ across modes). Flat keying by formula only
@@ -582,13 +637,35 @@ def assign_single_spec(spec_name, export_dicts, output_dir):
         res_dict.setdefault(form, {})[ion] = {
             "cand_tbl": output["output_tbl"],
         }
+    return res_dict
+
+
+def assign_single_spec(spec_name, export_dicts, output_dir):
+    res_dict = _build_subform_dict(export_dicts)
 
     if output_dir is not None:
         from pathlib import Path
 
         with open(Path(output_dir) / f"{spec_name}.json", "w") as f:
-            json.dump(res_dict, f, indent=4)
+            json.dump(res_dict, f, separators=(",", ":"))
     return res_dict
+
+
+def pack_single_spec(spec_name, export_dicts):
+    """Like assign_single_spec, but returns (name, compressed_blob) instead of
+    writing a loose JSON file per spectrum.
+
+    Run this inside a worker pool and feed the returned pairs to
+    metabo_depthcharge.mist_cf.common.subform_store.write_store to build one
+    packed subformula container -- this is what
+    mist_cf.preprocessing.04_create_subformulae_assignment writes by default,
+    instead of one JSON file per spectrum.
+    """
+    res_dict = _build_subform_dict(export_dicts)
+    blob = zstd.ZstdCompressor().compress(
+        json.dumps(res_dict, separators=(",", ":")).encode()
+    )
+    return spec_name, blob
 
 
 def clipped_ppm(mass_diff, parentmass):

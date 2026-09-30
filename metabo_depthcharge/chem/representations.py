@@ -6,17 +6,28 @@ from collections.abc import Iterable
 import numpy as np
 import torch
 from biosynfoni import Biosynfoni
-from map4 import MAP4
 from rdkit import Chem
 from rdkit.Chem import AllChem, DataStructs
+from skfp.fingerprints import MAPFingerprint
 from transformers import AutoModel, AutoTokenizer
 
+from metabo_depthcharge.chem import graphs
 from metabo_depthcharge.chem.molecule import Molecule, _lenient_mol_from_smiles
 from metabo_depthcharge.chem.tokenizers import (
     load_model,
     load_tokenizer,
     smiles_to_tokens,
 )
+
+
+def _batched_list(fn):
+    @functools.wraps(fn)
+    def wrapper(self, mol):
+        if isinstance(mol, Molecule):
+            return fn(self, mol)
+        return [fn(self, m) for m in mol]
+
+    return wrapper
 
 
 def _batched(fn):
@@ -67,6 +78,47 @@ class MoleculeToMorgan:
         if self.counts:
             return self.fpgen.GetCountFingerprintAsNumPy(mol.mol)
         return self.fpgen.GetFingerprintAsNumPy(mol.mol)
+
+
+class MoleculeToGraph:
+    """Molecular graphs, for the graph-based molecule encoders.
+
+    Each molecule yields per-atom and per-bond arrays. Use
+    :func:`~metabo_depthcharge.chem.graphs.pack` to fuse a collection of
+    molecular graphs into the flat table an encoder indexes.
+    """
+
+    #: Per-molecule array names this produces.
+    KEYS = ("atom_code", "bsrc", "bdst", "bcode")
+
+    @_batched_list
+    def __call__(
+        self, mol: Molecule | Iterable[Molecule]
+    ) -> dict[str, np.ndarray] | list[dict[str, np.ndarray]]:
+        """Featurize one or more molecules.
+
+        Parameters
+        ----------
+        mol : Molecule or iterable of Molecule
+            A single molecule or an iterable of molecules.
+
+        Returns
+        -------
+        dict or list of dict
+            One dict per molecule (a list of them for an iterable), holding:
+
+            ``atom_code`` : ``(n_atoms,)`` int64
+                One :func:`~metabo_depthcharge.chem.graphs.atom_code` per atom.
+            ``bsrc``, ``bdst`` : ``(n_bonds,)`` uint16
+                The two atoms of each bond, as positions in ``atom_code``.
+                Reverse edges and self-loops are not included but built internally
+                by :func:`~metabo_depthcharge.chem.graphs.expand_bonds`.
+            ``bcode`` : ``(n_bonds,)`` uint8
+                Each bond's :func:`~metabo_depthcharge.chem.graphs.bond_code`, a
+                value in ``[0, 16)`` packing bond order, conjugation and ring
+                membership.
+        """
+        return graphs.featurize(mol.mol)
 
 
 class MoleculeToRdkit:
@@ -163,7 +215,8 @@ class MoleculeToBiosynfoni:
 class MoleculeToMAP4:
     """MAP4 MinHashed atom-pair fingerprint.
 
-    Computed via the `map4 <https://pypi.org/project/map4/>`_ package.
+    Computed via `scikit-fingerprints
+    <https://github.com/MLCIL/scikit-fingerprints>`_'.
 
     Parameters
     ----------
@@ -174,12 +227,11 @@ class MoleculeToMAP4:
     """
 
     def __init__(self, rep_size: int = 4096, radius: int = 2):
-        self.map_calc = MAP4(
-            dimensions=rep_size, radius=radius, include_duplicated_shingles=False
+        self.map_calc = MAPFingerprint(
+            fp_size=rep_size, radius=radius, include_duplicated_shingles=False
         )
         self.rep_size = rep_size
 
-    @_batched
     def __call__(self, mol: Molecule | Iterable[Molecule]) -> np.ndarray:
         """Compute the MAP4 fingerprint.
 
@@ -194,10 +246,12 @@ class MoleculeToMAP4:
             ``(rep_size,)`` for a single molecule, or ``(N, rep_size)`` for an
             iterable of ``N`` molecules.
         """
-        # MAP4 shingles inherit the parsed mol's kekulization state, so re-parse
-        # from the canonical SMILES (via the same helper Molecule.mol uses) to
-        # keep the fingerprint invariant to the input SMILES dialect.
-        return self.map_calc.calculate(_lenient_mol_from_smiles(mol.canonical_smiles))
+        single = isinstance(mol, Molecule)
+        mols = [mol] if single else list(mol)
+        fps = self.map_calc.transform(
+            [_lenient_mol_from_smiles(m.canonical_smiles) for m in mols]
+        )
+        return fps[0] if single else fps
 
 
 class _HFEmbedder:
