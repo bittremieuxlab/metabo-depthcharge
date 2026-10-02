@@ -29,7 +29,12 @@ class IntFeaturizer(nn.Module):
 
         tensor = tensor.long()
         norm_embeds = self.int_to_feat_matrix[tensor[~extra_embed]]
-        extra_embeds = self._extra_embeddings[tensor[extra_embed] - self.MAX_COUNT_INT]
+        # Counts >= MAX_COUNT_INT all share the last extra embedding (larger counts used to index
+        # past the table: e.g. H>=256 in candidate formulae of ~2 kDa+ masses).
+        extra_idx = (tensor[extra_embed] - self.MAX_COUNT_INT).clamp(
+            max=self.NUM_EXTRA_EMBEDDINGS - 1
+        )
+        extra_embeds = self._extra_embeddings[extra_idx]
 
         out_tensor[~extra_embed] = norm_embeds
         out_tensor[extra_embed] = extra_embeds
