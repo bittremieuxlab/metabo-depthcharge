@@ -108,6 +108,10 @@ def main():
     if ionization is not None:
         labels_df = labels_df[labels_df["ionization"] == ionization]
 
+    start_idx = args.start_idx if args.start_idx is not None else 0
+    end_idx = args.end_idx if args.end_idx is not None else len(labels_df)
+    labels_df = labels_df.iloc[start_idx:end_idx]
+
     spec_lst = labels_df["spec"].to_list()
     labels_df = labels_df.fillna("").reset_index()
 
@@ -177,10 +181,6 @@ def main():
     parallel_list = [
         {"spec_name": k, "export_dicts": v} for k, v in spec_to_assigns.items()
     ]
-
-    start_idx = args.start_idx if args.start_idx is not None else 0
-    end_idx = args.end_idx if args.end_idx is not None else len(parallel_list)
-    parallel_list = parallel_list[start_idx:end_idx]
 
     def export_wrapper(x):
         return common.pack_single_spec(**x)

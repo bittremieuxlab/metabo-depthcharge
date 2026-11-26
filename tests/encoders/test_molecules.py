@@ -172,3 +172,20 @@ def test_bond_tokens_emit_one_token_per_bond(idx):
     for i, s in enumerate(GRAPH_SMILES):
         assert (~pad[i]).sum() == Molecule(s).mol.GetNumBonds()
     assert tokens[pad].abs().sum() == 0
+
+
+def test_bond_encoder_initial_messages_equal_h0_on_concatenated_inputs(idx):
+    """The split h0 (atom part per atom, bond part per bond code) is the
+    original ``relu(h0(cat([x[src], E[ecode]])))``: same values and gradients."""
+    torch.manual_seed(0)
+    enc = BondMolEncoder([32, 32, 32], 0.0, 32, per_atom=True)
+    x, _, _, src, _, ecode, _ = enc._unpack(idx)
+    reference = torch.relu(enc.h0(torch.cat([x[src], enc.ecodes[0](ecode)], -1)))
+    split = enc._initial_messages(x, src, ecode)
+    torch.testing.assert_close(split, reference, rtol=1e-5, atol=1e-6)
+
+    params = [enc.h0.weight, enc.h0.bias, enc.ecodes[0].weight]
+    g_ref = torch.autograd.grad(reference.square().sum(), params)
+    g_split = torch.autograd.grad(split.square().sum(), params)
+    for a, b in zip(g_split, g_ref, strict=True):
+        torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-5)
