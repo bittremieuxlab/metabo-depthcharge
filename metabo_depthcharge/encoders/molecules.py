@@ -361,11 +361,19 @@ class BondMolEncoder(GraphMolEncoder):
         if bond_tokens:
             self.bond_out = nn.Linear(h, channels[-1])
 
+    def _initial_messages(self, x, src, ecode):
+        """:math:`m^{(0)}_{vw} = \\mathrm{relu}(W_0 [x_v \\| e_{vw}])` for every directed
+        edge, computed as ``relu(W_x x[src] + (W_e E + b)[ecode])``: the same
+        ``h0`` layer split over its two inputs, so the atom part runs once per
+        atom and the bond part once per bond code instead of once per edge."""
+        w_x, w_e = self.h0.weight.split([graphs.FEAT_DIM, self.h0.out_features], 1)
+        atoms = functional.linear(x, w_x)
+        codes = functional.linear(self.ecodes[0].weight, w_e, self.h0.bias)
+        return functional.relu(atoms[src] + codes[ecode])
+
     def _propagate(self, x, src, dst, ecode, erev, n):
         """Node states -> (updated node states, directed-edge messages)."""
-        h0 = functional.relu(
-            self.h0(torch.cat([x[src], self.ecodes[0](ecode)], dim=-1))
-        )
+        h0 = self._initial_messages(x, src, ecode)
         m = h0
         for _ in range(self.depth - 1):
             node_sum = torch.zeros(n, m.shape[1], device=m.device, dtype=m.dtype)
